@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local environments
+venv/
+.venv/
+env/
+.env
+
+# NotebookLM / browser session data
+browser_data/
+.last_run.json
+
+# Generated lecture outputs and diagnostics
+output/
+
+# Build and packaging artifacts
+build/
+dist/
+release/
+installer_payload/
+portable_staging/
+setup_extract_test/
+*.spec.bak
+
+# Local scratch scripts with hard-coded lecture artifacts
+check_md.py
+format_qa*.py
+regenerate_docx.py
+regenerate_output.py
+rescue_docx.py
+revert_qa.py
+update_qa.py
+
+# Logs and OS/editor noise
+*.log
+*.tmp
+*.bak
+*.swp
+.DS_Store
+Thumbs.db

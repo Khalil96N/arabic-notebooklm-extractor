@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#111827">
+  <title>مستخرج محاضرات NotebookLM</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div class="page-shell">
+    <header class="hero">
+      <div class="brand-mark" aria-hidden="true">
+        <span></span><span></span><span></span>
+      </div>
+      <div>
+        <p class="eyebrow">NotebookLM Extractor</p>
+        <h1>حوّل المحاضرة إلى ملف منظم</h1>
+        <p class="hero-copy">
+          أدخل الاسم الدقيق للدفتر والمصدر. سيفتح Chrome تلقائيًا،
+          وينتظر تسجيل الدخول عند الحاجة، ثم ينشئ ملفات Word وMarkdown.
+        </p>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="card form-card">
+        <div class="section-heading">
+          <div>
+            <p class="kicker">مهمة جديدة</p>
+            <h2>بيانات الاستخراج</h2>
+          </div>
+          <span id="statusBadge" class="status-badge idle">جاهز</span>
+        </div>
+
+        <form id="extractForm">
+          <label for="notebookName">اسم دفتر NotebookLM</label>
+          <input
+            id="notebookName"
+            name="notebook_name"
+            type="text"
+            autocomplete="off"
+            placeholder="مثال: مقدمات علوم القرآن..."
+            required
+          >
+
+          <label for="lectureName">اسم المحاضرة أو المصدر</label>
+          <input
+            id="lectureName"
+            name="lecture_name"
+            type="text"
+            autocomplete="off"
+            placeholder="مثال: الفصل (2,3,4) - العقيدة 16.mp4"
+            required
+          >
+
+          <label for="profileName">حساب المتصفح</label>
+          <input
+            id="profileName"
+            name="profile_name"
+            type="text"
+            autocomplete="off"
+            value="account2"
+          >
+          <p class="field-help">
+            لكل اسم حساب جلسة Chrome محفوظة مستقلة.
+          </p>
+
+          <div class="actions">
+            <button id="startButton" class="button primary" type="submit">
+              <span>ابدأ الاستخراج</span>
+            </button>
+            <button id="stopButton" class="button danger" type="button" disabled>
+              إيقاف
+            </button>
+          </div>
+        </form>
+
+        <div id="notice" class="notice hidden" role="alert"></div>
+      </section>
+
+      <section class="card progress-card">
+        <div class="section-heading">
+          <div>
+            <p class="kicker">متابعة مباشرة</p>
+            <h2>سجل التنفيذ</h2>
+          </div>
+          <span id="activityDot" class="activity-dot" aria-hidden="true"></span>
+        </div>
+
+        <div id="emptyLog" class="empty-state">
+          <div class="empty-icon">01</div>
+          <p>سيظهر تقدم الاستخراج هنا بعد بدء المهمة.</p>
+        </div>
+        <div id="log" class="log hidden" aria-live="polite"></div>
+      </section>
+    </main>
+
+    <section class="card files-card">
+      <div class="section-heading">
+        <div>
+          <p class="kicker">المخرجات</p>
+          <h2>أحدث الملفات</h2>
+        </div>
+        <button id="refreshFiles" class="text-button" type="button">تحديث</button>
+      </div>
+      <div id="files" class="files-grid"></div>
+    </section>
+
+    <footer>
+      واجهة الويب تعمل محليًا على جهازك، والاستخراج نفسه يتم داخل NotebookLM.
+    </footer>
+  </div>
+</body>
+</html>
