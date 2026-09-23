@@ -20,10 +20,22 @@ class ExtractionPlanParser:
         r"\[\[\s*(?:سؤال\s+ختامي|سؤال\s+نهاية\s+الدرس|end\s+question)"
         r"\s*[:：\-]\s*([^\]\r\n]+?)\s*\]\]"
     )
+    START_BOUNDARY_PATTERN = re.compile(
+        r"\[\[\s*(?:بداية|جملة\s+البداية|start)\s*[:：\-]\s*"
+        r"([^\]\r\n]+?)\s*\]\]"
+    )
+    SECTION_END_BOUNDARY_PATTERN = re.compile(
+        r"\[\[\s*(?:نهاية|جملة\s+النهاية|end)\s*[:：\-]\s*"
+        r"([^\]\r\n]+?)\s*\]\]"
+    )
     LEGACY_HEADING_PATTERN = re.compile(
         r"(?m)^[ \t]*(?:#{1,6}[ \t]*)?\[\[\s*([^\]\r\n]+?)\s*\]\]"
     )
     NON_MAIN_PREFIXES = (
+        "بداية",
+        "جملة البداية",
+        "نهاية",
+        "جملة النهاية",
         "السؤال",
         "سؤال",
         "جواب",
@@ -56,15 +68,30 @@ class ExtractionPlanParser:
                 f"[bold green]Found {len(explicit_matches)} explicitly "
                 "marked main headings.[/bold green]"
             )
-            marked_items = [
-                (
-                    match.start(),
-                    match.group(1),
-                    1,
-                    "main",
+            marked_items = []
+            for index, match in enumerate(explicit_matches):
+                next_start = (
+                    explicit_matches[index + 1].start()
+                    if index + 1 < len(explicit_matches)
+                    else len(discovery_text)
                 )
-                for match in explicit_matches
-            ]
+                section_plan = discovery_text[match.end() : next_start]
+                marked_items.append(
+                    (
+                        match.start(),
+                        match.group(1),
+                        1,
+                        "main",
+                        cls._boundary_hint(
+                            cls.START_BOUNDARY_PATTERN,
+                            section_plan,
+                        ),
+                        cls._boundary_hint(
+                            cls.SECTION_END_BOUNDARY_PATTERN,
+                            section_plan,
+                        ),
+                    )
+                )
 
             end_markers = list(
                 cls.END_EXPLANATION_PATTERN.finditer(discovery_text)
@@ -84,6 +111,8 @@ class ExtractionPlanParser:
                         match.group(1),
                         2,
                         "end_question",
+                        None,
+                        None,
                     )
                     for match in end_questions
                 )
@@ -96,7 +125,7 @@ class ExtractionPlanParser:
             candidates = sorted(marked_items, key=lambda item: item[0])
         else:
             candidates = [
-                (match.start(), match.group(1), 1, "main")
+                (match.start(), match.group(1), 1, "main", None, None)
                 for match in cls.LEGACY_HEADING_PATTERN.finditer(
                     discovery_text
                 )
@@ -106,7 +135,7 @@ class ExtractionPlanParser:
                 "using conservative legacy heading detection.[/bold yellow]"
             )
 
-        for _, candidate, level, kind in candidates:
+        for _, candidate, level, kind, start_hint, end_hint in candidates:
             title = cls._clean_title(candidate)
             if kind == "main" and not cls._is_valid_main_title(
                 title, explicit=bool(explicit_matches)
@@ -132,7 +161,15 @@ class ExtractionPlanParser:
                     main_heading_number,
                 )
 
-            items.append(ExtractionItem(title=title, level=level, kind=kind))
+            items.append(
+                ExtractionItem(
+                    title=title,
+                    level=level,
+                    kind=kind,
+                    start_hint=start_hint if kind == "main" else None,
+                    end_hint=end_hint if kind == "main" else None,
+                )
+            )
             seen_titles.add(normalized_title)
 
         if items:
@@ -152,6 +189,17 @@ class ExtractionPlanParser:
     def _clean_title(title: str) -> str:
         title = title.replace("**", "").replace("__", "")
         return re.sub(r"\s+", " ", title).strip(" \t:：-–—")
+
+    @classmethod
+    def _boundary_hint(
+        cls,
+        pattern: re.Pattern[str],
+        text: str,
+    ) -> str | None:
+        match = pattern.search(text)
+        if not match:
+            return None
+        return cls._clean_title(match.group(1))
 
     @classmethod
     def _is_valid_main_title(cls, title: str, explicit: bool) -> bool:

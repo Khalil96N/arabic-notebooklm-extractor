@@ -41,6 +41,23 @@ class ExtractionPlanParserTests(unittest.TestCase):
             [item.title for item in items],
         )
 
+    def test_explicit_main_markers_keep_start_and_end_boundaries(self):
+        text = """
+[[رئيسي: المقدمة]]
+[[بداية: قال الشارح: بسم الله الرحمن الرحيم]]
+[[نهاية: ثم ننتقل إلى المسألة الثانية]]
+[[رئيسي: المسألة الثانية]]
+[[بداية: أما المسألة الثانية]]
+[[نهاية: فهذا آخر الكلام عليها]]
+"""
+
+        items = ExtractionPlanParser.parse_items(text)
+
+        self.assertEqual("قال الشارح: بسم الله الرحمن الرحيم", items[0].start_hint)
+        self.assertEqual("ثم ننتقل إلى المسألة الثانية", items[0].end_hint)
+        self.assertEqual("أما المسألة الثانية", items[1].start_hint)
+        self.assertEqual("فهذا آخر الكلام عليها", items[1].end_hint)
+
     def test_legacy_detection_only_accepts_line_start_headings(self):
         text = """
 [[المقدمة]]
@@ -95,6 +112,23 @@ class ExtractionPlanParserTests(unittest.TestCase):
         self.assertIn("حسن السؤال والاستشكال", prompts[0].heading)
         self.assertNotIn("حصراً بصيغة سؤال", prompts[0].prompt_text)
         self.assertNotIn("سؤال وجواب", prompts[0].prompt_text)
+
+    def test_prompt_generator_includes_section_boundaries(self):
+        items = [
+            ExtractionItem(
+                title="القسم الرئيس",
+                level=1,
+                start_hint="بدأ الشارح هنا",
+                end_hint="انتهى الشارح هنا",
+            ),
+        ]
+
+        prompts = PromptGenerator.generate_prompts(items)
+
+        self.assertIn("حدود هذا القسم", prompts[0].prompt_text)
+        self.assertIn("بدأ الشارح هنا", prompts[0].prompt_text)
+        self.assertIn("انتهى الشارح هنا", prompts[0].prompt_text)
+        self.assertIn("ولا تنتقل إلى ما بعد جملة النهاية", prompts[0].prompt_text)
 
     def test_end_questions_are_extracted_only_after_explanation_boundary(self):
         text = """

@@ -26,7 +26,13 @@ class TextExporter:
         """Save parsed phase-one items under the legacy diagnostic filename."""
         ensure_output_dir()
         path = settings.OUTPUT_DIR / "headings.txt"
-        lines = [f"{'#' * item.level} {item.title}" for item in items]
+        lines = []
+        for item in items:
+            lines.append(f"{'#' * item.level} {item.title}")
+            if item.start_hint:
+                lines.append(f"بداية: {item.start_hint}")
+            if item.end_hint:
+                lines.append(f"نهاية: {item.end_hint}")
         path.write_text("\n".join(lines), encoding="utf-8")
         logger.info(
             f"[bold green]Saved extraction items to {path}[/bold green]"

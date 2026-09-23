@@ -67,10 +67,18 @@ class SectionExtractor:
         save_lock = asyncio.Lock()
 
         async def save_completed_sections() -> None:
+            # The cumulative Russian-course flow writes its two final Word
+            # files only after every combined/vocabulary request finishes.
+            if any(
+                prompt.output_kind in ("vocabulary", "combined")
+                for prompt in prompts
+            ):
+                return
             completed_sections = [
                 (prompts[index].heading, text)
                 for index, text in enumerate(results)
                 if text is not None
+                and prompts[index].output_kind == "summary"
             ]
             if not completed_sections:
                 return
@@ -186,16 +194,16 @@ class SectionExtractor:
                 prompt_text = prompt_item.prompt_text
                 if current_marker:
                     prompt_text += (
-                        "\n\nتعليمة تقنية إلزامية: ابدأ إجابتك في أول سطر "
-                        f"بعنوان الفقرة «{prompt_item.heading}»، ثم ضع بعده "
-                        f"مباشرة الرمز [[{current_marker}]] كما هو حرفياً، "
-                        "ثم اكتب المحتوى المطلوب."
+                        f"\n\nابدأ بسطر: {prompt_item.heading} "
+                        f"[[{current_marker}]]"
                     )
 
+                previous_response = await self.page_client.latest_response(page)
                 await self.page_client.send_prompt(page, prompt_text)
                 section_text = await self.page_client.wait_for_response(
                     page,
                     marker=current_marker,
+                    previous_response=previous_response,
                 )
                 section_text = self.remove_task_marker(
                     section_text,

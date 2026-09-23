@@ -3,7 +3,14 @@
 An unofficial local tool for extracting structured Arabic lecture transcripts
 from NotebookLM and exporting them as Markdown and editable Word documents.
 
-The workflow runs in two stages. First it asks NotebookLM only for the lecture's
+The tool supports Arabic lectures, English-language courses, and Russian
+language courses with separate prompt files selected manually for each
+extraction. Russian-course output is reorganized into a fixed review order:
+new letters, rules and applications, model dialogues, then the recap and
+homework. A separate cumulative vocabulary document keeps every useful
+Cyrillic word or phrase with Arabic pronunciation and Arabic and English
+meanings. The workflow runs in two
+stages. First it asks NotebookLM only for the lecture's
 broad extraction plan. Then it requests every main section and end-of-lesson
 question separately before assembling the final Markdown and `.docx` outputs.
 
@@ -53,7 +60,8 @@ python web_app.py
 ```
 
 The app opens at `http://127.0.0.1:8765`. Enter the exact NotebookLM notebook
-name, lecture source name, and browser profile. Chrome opens for NotebookLM; if
+name, lecture source name, content type, and browser profile. Chrome opens for
+NotebookLM; if
 the profile is not signed in, the extraction waits until sign-in is completed
 or the web app's **Stop** button is pressed.
 
@@ -67,6 +75,9 @@ Run the tool via the CLI:
 python main.py --profile account2 --notebook "مقدمات" --lecture "اسم المحاضرة"
 ```
 
+Use `--content-type english` for an English course or `--content-type russian`
+for a Russian course. The default is `--content-type arabic`.
+
 Optional book/source context can be added with `--book "اسم الكتاب"`.
 
 ### First Time Run (Login Required)
@@ -77,9 +88,11 @@ The script will wait for a bit to allow you to log in. Once logged in, the sessi
 The extracted files are saved in the local `output/` directory:
 - `transcript.txt`: The phase-one extraction-plan response (legacy diagnostic filename).
 - `headings.txt`: The parsed extraction items (legacy diagnostic filename).
-- `section_prompts.md`: The generated Arabic prompts for each individual section.
+- `section_prompts.md`: The generated prompts for the selected content type.
 - `<lecture>.md`: The final transcript assembled from the separate detailed extractions.
 - `<lecture>.docx`: The formatted Word version of the assembled transcript.
+- Russian courses instead update two cumulative Word files: a summary for
+  lectures `1-N` and a separate thematic vocabulary table for lectures `1-N`.
 
 ## Project Structure
 
@@ -88,10 +101,15 @@ The extracted files are saved in the local `output/` directory:
 - `app/services/notebooklm_page.py`: browser navigation, source selection, and response reading.
 - `app/services/retry_button.py`: automatic NotebookLM Retry/Try again button handling.
 - `app/services/section_extractor.py`: parallel section extraction and retries.
-- `app/prompts/templates.py`: all NotebookLM prompt text.
+- `app/prompts/arabic_lecture_templates.py`: Arabic lecture prompts.
+- `app/prompts/english_course_templates.py`: English course prompts.
+- `app/prompts/russian_course_templates.py`: Russian course prompts with
+  fixed summary sections and a separate vocabulary extraction schema.
 - `app/prompts/generator.py`: builds one prompt per heading or final question.
 - `app/exporters/text.py`: transcript, headings, prompts, and Markdown output.
 - `app/exporters/word.py`: Word document rendering.
+- `app/exporters/russian_course.py`: cumulative Russian summary and thematic
+  vocabulary Word documents with cross-lecture deduplication.
 - `app/exporters/file.py`: backward-compatible exporter facade.
 - `web_app.py`: local HTTP server and extraction job manager.
 - `web/`: local browser interface.

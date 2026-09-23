@@ -19,6 +19,7 @@ DATA_ROOT.mkdir(parents=True, exist_ok=True)
 os.environ["NOTEBOOKLM_DATA_DIR"] = str(DATA_ROOT)
 
 from app.config.state import StateManager
+from app.prompts.profiles import DEFAULT_CONTENT_TYPE, VALID_CONTENT_TYPES
 from app.workflow import run_workflow
 
 
@@ -27,15 +28,27 @@ def main() -> None:
     parser.add_argument("--profile", default="default")
     parser.add_argument("--notebook", required=True)
     parser.add_argument("--lecture", required=True)
+    parser.add_argument("--book", default=None)
+    parser.add_argument(
+        "--content-type",
+        choices=sorted(VALID_CONTENT_TYPES),
+        default=DEFAULT_CONTENT_TYPE,
+    )
     args = parser.parse_args()
 
     os.chdir(DATA_ROOT)
-    StateManager.save_state(args.profile, args.notebook)
+    StateManager.save_state(
+        args.profile,
+        args.notebook,
+        args.content_type,
+    )
     output_name = asyncio.run(
         run_workflow(
             args.profile,
             args.notebook,
             args.lecture,
+            book_name=args.book,
+            content_type=args.content_type,
         )
     )
     raise SystemExit(0 if output_name else 1)

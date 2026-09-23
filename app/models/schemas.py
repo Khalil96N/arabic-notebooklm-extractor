@@ -7,6 +7,8 @@ class ExtractionItem(BaseModel):
     title: str
     level: int
     kind: Literal["main", "end_question"] = "main"
+    start_hint: str | None = None
+    end_hint: str | None = None
 
 
 class ExtractionPlan(BaseModel):
@@ -17,3 +19,4 @@ class ExtractionPlan(BaseModel):
 class PromptItem(BaseModel):
     heading: str
     prompt_text: str
+    output_kind: Literal["summary", "vocabulary", "combined"] = "summary"

@@ -29,6 +29,7 @@ DATA_ROOT.mkdir(parents=True, exist_ok=True)
 os.environ["NOTEBOOKLM_DATA_DIR"] = str(DATA_ROOT)
 
 from app.config.state import StateManager
+from app.prompts.profiles import DEFAULT_CONTENT_TYPE, validate_content_type
 
 
 WEB_ROOT = RESOURCE_ROOT / "web"
@@ -47,27 +48,28 @@ def build_extraction_command(
     profile_name: str,
     notebook_name: str,
     lecture_name: str,
+    content_type: str = DEFAULT_CONTENT_TYPE,
+    book_name: str = "",
 ) -> list[str]:
-    if FROZEN:
-        return [
-            str(Path(sys.executable).with_name("NotebookLMWorker.exe")),
-            "--profile",
-            profile_name,
-            "--notebook",
-            notebook_name,
-            "--lecture",
-            lecture_name,
-        ]
-    return [
-        str(extraction_python()),
-        str(MAIN_SCRIPT),
+    content_type = validate_content_type(content_type)
+    executable = (
+        [str(Path(sys.executable).with_name("NotebookLMWorker.exe"))]
+        if FROZEN
+        else [str(extraction_python()), str(MAIN_SCRIPT)]
+    )
+    command = executable + [
         "--profile",
         profile_name,
         "--notebook",
         notebook_name,
         "--lecture",
         lecture_name,
+        "--content-type",
+        content_type,
     ]
+    if book_name:
+        command += ["--book", book_name]
+    return command
 
 
 def output_file_from_name(name: str) -> Path | None:
@@ -129,6 +131,8 @@ class JobManager:
         self._profile_name = ""
         self._notebook_name = ""
         self._lecture_name = ""
+        self._book_name = ""
+        self._content_type = DEFAULT_CONTENT_TYPE
         self._stopping = False
 
     def start(
@@ -136,10 +140,14 @@ class JobManager:
         profile_name: str,
         notebook_name: str,
         lecture_name: str,
+        content_type: str = DEFAULT_CONTENT_TYPE,
+        book_name: str = "",
     ) -> dict:
         profile_name = profile_name.strip() or "default"
         notebook_name = notebook_name.strip()
         lecture_name = lecture_name.strip()
+        book_name = book_name.strip()
+        content_type = validate_content_type(content_type)
         if not notebook_name or not lecture_name:
             raise ValueError("اسم الدفتر واسم المحاضرة مطلوبان.")
 
@@ -156,16 +164,28 @@ class JobManager:
             self._profile_name = profile_name
             self._notebook_name = notebook_name
             self._lecture_name = lecture_name
+            self._book_name = book_name
+            self._content_type = content_type
             self._stopping = False
             self._append_log_unlocked(
                 "بدء المهمة. سيفتح Chrome تلقائيًا. إذا طُلب تسجيل الدخول، "
                 "أكمله في نافذة Chrome."
             )
 
-            StateManager.save_state(profile_name, notebook_name)
+            StateManager.save_state(
+                profile_name,
+                notebook_name,
+                content_type,
+            )
             self._worker = threading.Thread(
                 target=self._run,
-                args=(profile_name, notebook_name, lecture_name),
+                args=(
+                    profile_name,
+                    notebook_name,
+                    lecture_name,
+                    content_type,
+                    book_name,
+                ),
                 daemon=True,
             )
             self._worker.start()
@@ -206,6 +226,8 @@ class JobManager:
         profile_name: str,
         notebook_name: str,
         lecture_name: str,
+        content_type: str,
+        book_name: str = "",
     ) -> None:
         environment = os.environ.copy()
         environment.update(
@@ -228,6 +250,8 @@ class JobManager:
                     profile_name,
                     notebook_name,
                     lecture_name,
+                    content_type,
+                    book_name,
                 ),
                 cwd=DATA_ROOT,
                 stdout=subprocess.PIPE,
@@ -308,6 +332,8 @@ class JobManager:
             "profile_name": self._profile_name,
             "notebook_name": self._notebook_name,
             "lecture_name": self._lecture_name,
+            "book_name": self._book_name,
+            "content_type": self._content_type,
             "can_start": not (
                 self._process and self._process.poll() is None
             ),
@@ -338,6 +364,10 @@ class NotebookLMWebHandler(BaseHTTPRequestHandler):
                             "account2",
                         ),
                         "notebook_name": state.get("notebook_name", ""),
+                        "content_type": state.get(
+                            "content_type",
+                            DEFAULT_CONTENT_TYPE,
+                        ),
                     },
                     "job": JOB_MANAGER.snapshot(),
                 }
@@ -395,6 +425,8 @@ class NotebookLMWebHandler(BaseHTTPRequestHandler):
                     payload.get("profile_name", ""),
                     payload.get("notebook_name", ""),
                     payload.get("lecture_name", ""),
+                    payload.get("content_type", DEFAULT_CONTENT_TYPE),
+                    payload.get("book_name", ""),
                 )
             except ValueError as exc:
                 self._send_json({"error": str(exc)}, status=400)

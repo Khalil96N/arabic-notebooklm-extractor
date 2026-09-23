@@ -55,6 +55,25 @@
             required
           >
 
+          <label for="bookName">اسم الكتاب أو المصدر (اختياري)</label>
+          <input
+            id="bookName"
+            name="book_name"
+            type="text"
+            autocomplete="off"
+            placeholder="مثال: كتاب العقيدة الطحاوية"
+          >
+
+          <label for="contentType">نوع المحتوى</label>
+          <select id="contentType" name="content_type">
+            <option value="arabic">محاضرة عربية</option>
+            <option value="english">كورس إنجليزي</option>
+            <option value="russian">كورس روسي</option>
+          </select>
+          <p class="field-help">
+            يحدد ملف البرومبتات المستخدم في التخطيط واستخراج الأقسام.
+          </p>
+
           <label for="profileName">حساب المتصفح</label>
           <input
             id="profileName"

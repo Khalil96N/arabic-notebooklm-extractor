@@ -11,7 +11,8 @@ from app.utils.logger import logger
 
 
 class NotebookLMPageClient:
-    NOTEBOOKLM_URL = "https://notebooklm.google.com/"
+    NOTEBOOKLM_URL = "https://notebook.google.com/"
+    NOTEBOOKLM_HOSTS = ("notebook.google.com", "notebooklm.google.com")
 
     def __init__(self, context: BrowserContext) -> None:
         self.context = context
@@ -37,7 +38,7 @@ class NotebookLMPageClient:
         current_url = page.url
         if "accounts.google.com" in current_url:
             return False
-        if "notebooklm.google.com" not in current_url:
+        if not any(host in current_url for host in self.NOTEBOOKLM_HOSTS):
             return False
 
         checks = [
@@ -55,7 +56,14 @@ class NotebookLMPageClient:
                     return True
             except Exception:
                 continue
-        return False
+
+        # NotebookLM's current dashboard uses notebook.google.com and its
+        # localized/experiment variants do not always expose the legacy
+        # "Create notebook" labels or /notebook/ links immediately. Reaching
+        # either NotebookLM host without an accounts.google.com redirect means
+        # Google authentication has completed; notebook discovery performs the
+        # stricter page-content check next.
+        return True
 
     async def wait_for_login(self, page: Page) -> None:
         logger.info("[bold cyan]Checking login status...[/bold cyan]")
@@ -174,6 +182,14 @@ class NotebookLMPageClient:
         lecture_name: str,
         book_name: str = None,
     ) -> None:
+        select_all_matches = lecture_name.casefold().startswith("all:")
+        lecture_target = (
+            lecture_name.split(":", 1)[1].strip()
+            if select_all_matches
+            else lecture_name
+        )
+        if select_all_matches and not lecture_target:
+            raise ValueError("ALL: source selector requires a match target.")
         logger.info(
             f"[bold cyan]Looking for source '{lecture_name}' "
             f"(and optionally book '{book_name}') in sidebar...[/bold cyan]"
@@ -192,18 +208,11 @@ class NotebookLMPageClient:
         checkbox_count = await checkboxes.count()
         logger.info(f"[dim]Found {checkbox_count} source checkboxes.[/dim]")
 
-        for index in range(checkbox_count):
-            checkbox = checkboxes.nth(index)
-            try:
-                if await checkbox.is_checked():
-                    await checkbox.click(force=True)
-                    await page.wait_for_timeout(300)
-            except Exception:
-                continue
-
-        await page.wait_for_timeout(1000)
         lecture_found = False
+        lecture_match_count = 0
         book_found = book_name is None
+        source_rows: list[tuple[int, str]] = []
+        desired_indices: set[int] = set()
 
         for index in range(checkbox_count):
             checkbox = checkboxes.nth(index)
@@ -221,20 +230,25 @@ class NotebookLMPageClient:
                     f"'{text}' -> '{normalized_text}'[/dim]"
                 )
 
+                # The first checkbox is normally NotebookLM's global
+                # "Select all" control.  Keep it out of the source set and
+                # set each real source to its explicit final state below.
+                if normalized_text == "selectall":
+                    continue
+
+                source_rows.append((index, text))
+
                 if (
-                    not lecture_found
+                    (select_all_matches or not lecture_found)
                     and self._source_matches(
-                        lecture_name,
+                        lecture_target,
                         text,
                     )
                     and len(text) < 300
                 ):
-                    await checkbox.click(force=True)
+                    desired_indices.add(index)
                     lecture_found = True
-                    logger.info(
-                        f"[bold green]Successfully checked lecture source: "
-                        f"{text.strip()[:60]}[/bold green]"
-                    )
+                    lecture_match_count += 1
 
                 if (
                     book_name
@@ -245,12 +259,8 @@ class NotebookLMPageClient:
                     )
                     and len(text) < 300
                 ):
-                    await checkbox.click(force=True)
+                    desired_indices.add(index)
                     book_found = True
-                    logger.info(
-                        f"[bold green]Successfully checked book source: "
-                        f"{text.strip()[:60]}[/bold green]"
-                    )
             except Exception:
                 continue
 
@@ -261,11 +271,64 @@ class NotebookLMPageClient:
             )
             raise RuntimeError(f"Source '{lecture_name}' not found.")
 
+        if select_all_matches:
+            logger.info(
+                f"[bold green]Successfully checked {lecture_match_count} "
+                f"lecture sources matching '{lecture_target}'.[/bold green]"
+            )
+
         if book_name and not book_found:
             logger.warning(
                 f"[bold yellow]Could not find book source '{book_name}'! "
                 f"Proceeding with lecture only.[/bold yellow]"
             )
+
+        async def enforce_checkbox_state(index: int, desired_state: bool) -> None:
+            checkbox = checkboxes.nth(index)
+            if await checkbox.is_checked() == desired_state:
+                return
+
+            # Angular Material owns the state on the mat-checkbox host.  A
+            # native input click or set_checked call can leave its model
+            # unchanged, while clicking the component host updates both the
+            # UI and the underlying source selection.
+            await checkbox.evaluate(
+                "(element) => element.closest('mat-checkbox').click()"
+            )
+            await page.wait_for_timeout(500)
+
+            if await checkbox.is_checked() != desired_state:
+                raise RuntimeError(
+                    "Could not enforce the requested NotebookLM source "
+                    "selection."
+                )
+
+        # Select the requested lecture first so NotebookLM never reaches a
+        # transient zero-source state, then explicitly clear every other row.
+        for index in sorted(desired_indices):
+            await enforce_checkbox_state(index, True)
+        for index, _text in source_rows:
+            if index not in desired_indices:
+                await enforce_checkbox_state(index, False)
+
+        selected_sources: list[str] = []
+        for index, text in source_rows:
+            if await checkboxes.nth(index).is_checked():
+                selected_sources.append(text.strip())
+
+        expected_selected_count = len(desired_indices)
+        if len(selected_sources) != expected_selected_count:
+            raise RuntimeError(
+                "NotebookLM source selection verification failed: "
+                f"expected {expected_selected_count}, found "
+                f"{len(selected_sources)}."
+            )
+
+        logger.info(
+            "[bold green]Verified final selected sources "
+            f"({len(selected_sources)}): "
+            f"{', '.join(selected_sources)}[/bold green]"
+        )
 
         await page.wait_for_timeout(2000)
 
@@ -291,29 +354,51 @@ class NotebookLMPageClient:
         logger.info("[bold cyan]Typing extraction prompt...[/bold cyan]")
         await chat_input.click()
         await chat_input.fill(prompt)
-        await page.wait_for_timeout(500)
+        await page.wait_for_timeout(1000)
 
         prompt_sent = False
-        for selector in (
+        send_selectors = (
             'button[aria-label="Send"]',
             'button[aria-label*="send" i]',
+            'button[aria-label*="إرسال" i]',
             'button[type="submit"]',
-        ):
-            try:
-                send_button = page.locator(selector).last
-                if await send_button.is_visible():
-                    await send_button.click()
-                    prompt_sent = True
-                    logger.info(
-                        "[bold green]Prompt sent via send button.[/bold green]"
-                    )
-                    break
-            except Exception:
-                continue
+            'button:has(mat-icon:has-text("send"))',
+            'button:has(mat-icon:has-text("arrow_upward"))',
+            'button:has-text("send")',
+            'button:has-text("arrow_upward")',
+        )
+        for _ in range(16):
+            for selector in send_selectors:
+                try:
+                    send_button = page.locator(selector).last
+                    if (
+                        await send_button.is_visible(timeout=300)
+                        and await send_button.is_enabled(timeout=300)
+                    ):
+                        await send_button.click()
+                        prompt_sent = True
+                        logger.info(
+                            "[bold green]Prompt sent via send button."
+                            "[/bold green]"
+                        )
+                        break
+                except Exception:
+                    continue
+            if prompt_sent:
+                break
+            await page.wait_for_timeout(500)
 
         if not prompt_sent:
+            try:
+                await chat_input.press("Control+Enter")
+                await page.wait_for_timeout(500)
+            except Exception:
+                pass
             await chat_input.press("Enter")
-            logger.info("[bold green]Prompt sent via Enter key.[/bold green]")
+            logger.warning(
+                "[bold yellow]Prompt sent via keyboard fallback."
+                "[/bold yellow]"
+            )
 
         await page.wait_for_timeout(500)
 
@@ -321,6 +406,7 @@ class NotebookLMPageClient:
         self,
         page: Page,
         marker: str = None,
+        previous_response: str | None = None,
     ) -> str:
         logger.info(
             f"[bold cyan]Waiting for response generation "
@@ -333,6 +419,7 @@ class NotebookLMPageClient:
         stable_count = 0
         elapsed = 0
         poll_interval = 3000
+        marker_fallback_logged = False
 
         while elapsed < settings.TIMEOUT_MS:
             if await retry_handler.click_if_present():
@@ -341,11 +428,29 @@ class NotebookLMPageClient:
                 elapsed = 0
                 continue
 
-            current_text = (
-                await self.response_by_marker(page, marker)
-                if marker
-                else await self.latest_response(page)
-            )
+            if marker:
+                current_text = await self.response_by_marker(page, marker)
+                if (
+                    not current_text
+                    and previous_response is not None
+                ):
+                    latest_text = await self.latest_response(page)
+                    if (
+                        latest_text
+                        and latest_text != previous_response
+                        and elapsed >= 30000
+                        and len(latest_text.strip()) > 100
+                    ):
+                        current_text = latest_text
+                        if not marker_fallback_logged:
+                            logger.warning(
+                                "[bold yellow]Marker was not found yet; "
+                                "watching the newest changed response instead."
+                                "[/bold yellow]"
+                            )
+                            marker_fallback_logged = True
+            else:
+                current_text = await self.latest_response(page)
             if current_text and len(current_text) > 5:
                 if current_text == previous_text:
                     stable_count += 1
@@ -382,9 +487,11 @@ class NotebookLMPageClient:
             try:
                 elements = await page.locator(selector).all()
                 if elements:
-                    text = await elements[-1].inner_text()
-                    if text and len(text.strip()) > 10:
-                        return text.strip()
+                    text = self.clean_response_text(
+                        await elements[-1].inner_text()
+                    )
+                    if text and len(text) > 10:
+                        return text
             except Exception:
                 continue
 
@@ -393,7 +500,11 @@ class NotebookLMPageClient:
                 'main, [role="main"], .chat-container'
             ).first
             if await main_area.is_visible():
-                return (await main_area.inner_text()).strip()
+                text = self.clean_response_text(
+                    await main_area.inner_text()
+                )
+                if text and len(text) > 10:
+                    return text
         except Exception:
             pass
         return ""
@@ -414,15 +525,29 @@ class NotebookLMPageClient:
             try:
                 elements = await page.locator(selector).all()
                 for element in elements:
-                    text = await element.inner_text()
-                    if text and len(text.strip()) > 10:
-                        text = text.strip()
+                    text = self.clean_response_text(
+                        await element.inner_text()
+                    )
+                    if text and len(text) > 10:
                         if text not in seen:
                             candidates.append(text)
                             seen.add(text)
             except Exception:
                 continue
         return candidates
+
+    @staticmethod
+    def clean_response_text(text: str | None) -> str:
+        if not text:
+            return ""
+
+        lines = text.strip().splitlines()
+        while lines and lines[0].strip().casefold() in {
+            "thoughts",
+            "expand_more",
+        }:
+            lines.pop(0)
+        return "\n".join(lines).strip()
 
     @staticmethod
     def response_selectors() -> tuple[str, ...]:

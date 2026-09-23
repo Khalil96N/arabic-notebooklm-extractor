@@ -60,20 +60,24 @@ def arabic_ordinal(number: int, definite: bool = False) -> str:
 
 def strip_main_heading_ordinal(title: str) -> str:
     """Remove a generated Arabic ordinal prefix from a heading."""
-    match = re.match(r"^\s*([^:：]{1,40})\s*[:：]\s*(.+)$", title)
-    if not match:
-        return title.strip()
-
-    prefix = _normalize_ordinal(match.group(1))
     known_ordinals = {
-        _normalize_ordinal(arabic_ordinal(number, definite=definite))
+        variant
         for number in range(1, 100)
         for definite in (False, True)
+        for variant in _ordinal_variants(arabic_ordinal(number, definite=definite))
     }
-    if prefix in known_ordinals or re.fullmatch(r"رقم\s+\d+", prefix):
-        return match.group(2).strip()
 
-    return title.strip()
+    clean_title = title.strip()
+    while True:
+        match = re.match(r"^\s*([^:：]{1,40})\s*[:：]\s*(.+)$", clean_title)
+        if not match:
+            return clean_title
+
+        prefix = _normalize_ordinal(match.group(1))
+        if prefix not in known_ordinals and not re.fullmatch(r"رقم\s+\d+", prefix):
+            return clean_title
+
+        clean_title = match.group(2).strip()
 
 
 def number_main_heading(title: str, number: int) -> str:
@@ -84,3 +88,11 @@ def number_main_heading(title: str, number: int) -> str:
 def _normalize_ordinal(text: str) -> str:
     text = re.sub(r"[\u064B-\u065F\u0670]", "", text)
     return re.sub(r"\s+", " ", text).strip()
+
+
+def _ordinal_variants(text: str) -> set[str]:
+    normalized = _normalize_ordinal(text)
+    variants = {normalized}
+    if normalized.startswith("ال"):
+        variants.add(normalized[2:].strip())
+    return variants

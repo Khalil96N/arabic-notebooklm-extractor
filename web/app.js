@@ -1,6 +1,8 @@
 const form = document.getElementById("extractForm");
 const notebookInput = document.getElementById("notebookName");
 const lectureInput = document.getElementById("lectureName");
+const bookInput = document.getElementById("bookName");
+const contentTypeInput = document.getElementById("contentType");
 const profileInput = document.getElementById("profileName");
 const startButton = document.getElementById("startButton");
 const stopButton = document.getElementById("stopButton");
@@ -79,6 +81,8 @@ function renderStatus(job) {
   stopButton.disabled = !job.can_stop;
   notebookInput.disabled = !job.can_start;
   lectureInput.disabled = !job.can_start;
+  bookInput.disabled = !job.can_start;
+  contentTypeInput.disabled = !job.can_start;
   profileInput.disabled = !job.can_start;
 }
 
@@ -177,6 +181,8 @@ form.addEventListener("submit", async (event) => {
         profile_name: profileInput.value,
         notebook_name: notebookInput.value,
         lecture_name: lectureInput.value,
+        book_name: bookInput.value,
+        content_type: contentTypeInput.value,
       }),
     });
     renderStatus(job);
@@ -214,6 +220,7 @@ async function initialize() {
     const data = await api("/api/state");
     profileInput.value = data.defaults.profile_name || "account2";
     notebookInput.value = data.defaults.notebook_name || "";
+    contentTypeInput.value = data.defaults.content_type || "arabic";
     renderStatus(data.job);
     appendLogs(data.job.logs);
     lastLogId = data.job.last_log_id || lastLogId;
