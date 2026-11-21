@@ -68,7 +68,10 @@ class NotebookLMService:
         )
         return ExtractionPlan(
             discovery_text=discovery_text,
-            items=ExtractionPlanParser.parse_items(discovery_text),
+            items=ExtractionPlanParser.parse_items(
+                discovery_text,
+                number_main_headings=content_type != "english",
+            ),
         )
 
     async def extract_sections(

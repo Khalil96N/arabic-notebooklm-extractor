@@ -11,6 +11,29 @@ from app.utils.logger import logger
 
 
 class TextExporter:
+    DIAGNOSTIC_FILENAMES = (
+        "transcript.txt",
+        "headings.txt",
+        "section_prompts.md",
+    )
+
+    @staticmethod
+    def cleanup_diagnostics() -> None:
+        """Remove run-only files after final exports have succeeded.
+
+        Failed runs keep these files so extraction can be inspected or resumed.
+        Cleanup errors must not turn a completed export into a failed job.
+        """
+        for filename in TextExporter.DIAGNOSTIC_FILENAMES:
+            path = settings.OUTPUT_DIR / filename
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as exc:
+                logger.warning(
+                    f"[yellow]Could not remove temporary file {path}: "
+                    f"{exc}[/yellow]"
+                )
+
     @staticmethod
     def save_discovery_response(text: str) -> None:
         """Save the phase-one response under its legacy diagnostic filename."""

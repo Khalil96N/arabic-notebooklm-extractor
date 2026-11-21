@@ -1,17 +1,185 @@
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
+from docx import Document
+
 from app.config.settings import settings
+from app.exporters.file import FileExporter
 from app.models.schemas import ExtractionItem, PromptItem
 from app.prompts.arabic_lecture_templates import build_outline_prompt
 from app.prompts.generator import PromptGenerator
 from app.utils.arabic import number_main_heading
-from app.workflow import aggregate_russian_chunks, next_output_name
+from app.workflow import (
+    aggregate_english_sections,
+    aggregate_russian_chunks,
+    next_output_name,
+)
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_english_math_commands_are_normalized_before_both_exports(self):
+        prompts = [PromptItem(heading="المعادلة", prompt_text="p")]
+        raw = r"<equation>M = d \times (n - 1 - g) + \sum_{i=1}^{g} f_i</equation>"
+        sections = aggregate_english_sections(prompts, [("المعادلة", raw)])
+        self.assertIn("∑_(i=1)^g f_i", sections[0][1])
+        self.assertIn("d ×", sections[0][1])
+        self.assertNotIn("\\", sections[0][1])
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(settings, "OUTPUT_DIR", Path(directory)):
+                FileExporter.save_final_transcript(sections[0][1], "math")
+                FileExporter.save_word_document(sections, "math", number_main_headings=False)
+            self.assertNotIn("\\sum", (Path(directory) / "math.md").read_text(encoding="utf-8"))
+            with zipfile.ZipFile(Path(directory) / "math.docx") as archive:
+                xml = archive.read("word/document.xml").decode("utf-8")
+            self.assertIn("<m:nary>", xml)
+            self.assertIn("<m:sSub>", xml)
+            self.assertNotIn("\\sum", xml)
+
+    def test_english_aggregation_moves_unique_logistics_to_final_section(self):
+        prompts = [
+            PromptItem(heading="المفاهيم الأساسية", prompt_text="p"),
+            PromptItem(heading="خلاصة المحاضرة", prompt_text="p"),
+            PromptItem(
+                heading="استخراج المعلومات التنظيمية",
+                prompt_text="p",
+                output_kind="logistics",
+            ),
+        ]
+        sections = aggregate_english_sections(
+            prompts,
+            [
+                (
+                    "المفاهيم الأساسية",
+                    "شرح المفهوم.\n"
+                    "<logistics>\n- الاختبار يوم الخميس.\n"
+                    "- تسليم المشروع يوم الأحد.\n</logistics>",
+                ),
+                (
+                    "خلاصة المحاضرة",
+                    "خلاصة علمية.\n"
+                    "<logistics>\n- الاختبار يوم الخميس\n</logistics>",
+                ),
+                (
+                    "استخراج المعلومات التنظيمية",
+                    "<logistics>\n- الاختبار يوم الخميس\n"
+                    "- تسليم المشروع يوم الأحد\n</logistics>",
+                ),
+            ]
+        )
+
+        self.assertEqual("معلومات تنظيمية مهمة", sections[-1][0])
+        self.assertEqual(
+            "- الاختبار يوم الخميس.\n- تسليم المشروع يوم الأحد.",
+            sections[-1][1],
+        )
+        self.assertNotIn(
+            "استخراج المعلومات التنظيمية",
+            [heading for heading, _text in sections],
+        )
+        self.assertTrue(all("<logistics>" not in text for _, text in sections))
+
+        without_logistics = aggregate_english_sections(
+            [PromptItem(heading="قسم علمي", prompt_text="p")],
+            [
+                (
+                    "قسم علمي",
+                    "شرح علمي. <logistics>لا توجد معلومات تنظيمية مهمة.</logistics>",
+                ),
+            ]
+        )
+        self.assertEqual([("قسم علمي", "شرح علمي.")], without_logistics)
+
+    def test_english_notes_and_logistics_export_to_markdown_and_word(self):
+        prompt_headings = [
+            "المفاهيم الأساسية",
+            "خلاصة المحاضرة",
+            "سؤال للمراجعة: ما المقصود بالحركة؟",
+        ]
+        prompts = [
+            PromptItem(heading=heading, prompt_text="p")
+            for heading in prompt_headings
+        ]
+        sections = aggregate_english_sections(
+            prompts,
+            [
+                (
+                    "المفاهيم الأساسية",
+                    "<subheading>التعريف</subheading>\n"
+                    "درجات الحرية <term>Degrees of Freedom</term> "
+                    "تحدد الحركة الممكنة.\n"
+                    "<logistics>\n- الموعد النهائي يوم الجمعة.\n"
+                    "</logistics>",
+                ),
+                (
+                    "خلاصة المحاضرة",
+                    "<subheading>خلاصة المحاضرة</subheading>\n"
+                    "- تحدد المفاصل حركة الروبوت.\n"
+                    "<equation>F = 3n - 2j</equation>",
+                ),
+                (
+                    "سؤال للمراجعة: ما المقصود بالحركة؟",
+                    "الحركة الممكنة للنظام.",
+                ),
+            ]
+        )
+        final_text = "\n\n".join(
+            f"## {heading}\n\n{text}" for heading, text in sections
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir)
+            with patch.object(settings, "OUTPUT_DIR", output_dir):
+                FileExporter.save_final_transcript(final_text, "محاضرة إنجليزية")
+                FileExporter.save_word_document(sections, "محاضرة إنجليزية")
+
+            markdown = (output_dir / "محاضرة إنجليزية.md").read_text(
+                encoding="utf-8"
+            )
+            document = Document(output_dir / "محاضرة إنجليزية.docx")
+            word_text = "\n".join(
+                paragraph.text for paragraph in document.paragraphs
+            )
+            with zipfile.ZipFile(output_dir / "محاضرة إنجليزية.docx") as archive:
+                document_xml = archive.read("word/document.xml").decode(
+                    "utf-8"
+                )
+
+        self.assertIn("## خلاصة المحاضرة", markdown)
+        self.assertLess(
+            markdown.index("## سؤال للمراجعة"),
+            markdown.index("## معلومات تنظيمية مهمة"),
+        )
+        self.assertTrue(
+            markdown.rstrip().endswith("الموعد النهائي يوم الجمعة.")
+        )
+        self.assertIn("Degrees of Freedom", markdown)
+        self.assertIn("Degrees of Freedom", word_text)
+        self.assertIn("الموعد النهائي يوم الجمعة", word_text)
+        self.assertNotIn("<logistics>", markdown)
+        self.assertNotIn("<logistics>", document_xml)
+        self.assertIn("<m:oMathPara>", document_xml)
+
+    def test_letter_merge_preserves_details_through_chunk_cleanup(self):
+        prompt = PromptItem(heading='قسم', prompt_text='p', output_kind='combined')
+        text = (
+            '<letters_section>\n'
+            '<russian>И и</russian><pronunciation>إي</pronunciation><translation>حرف علة</translation>\n'
+            '<russian>Й й</russian><pronunciation>إي قصيرة</pronunciation><translation>ياء ساكنة</translation>\n'
+            '<russian>Е е</russian><pronunciation>يه</pronunciation><translation>حرف</translation>\n'
+            '<russian>Ё ё</russian><pronunciation>يو</pronunciation><translation>حرف آخر</translation>\n'
+            '<russian>И и</russian><pronunciation>صوت جديد مشروح</pronunciation>تنبيه جديد خارج الوسوم.\n'
+            '</letters_section><rules_section></rules_section>'
+            '<dialogues_section></dialogues_section><vocabulary_section></vocabulary_section>'
+        )
+        sections, _ = aggregate_russian_chunks([prompt], [('قسم', text)])
+        letters = dict(sections)['الحروف الجديدة']
+        self.assertEqual(4, letters.count('<russian>'))
+        self.assertIn('صوت جديد مشروح', letters)
+        self.assertIn('تنبيه جديد خارج الوسوم.', letters)
+
     def test_outline_prompt_only_requests_the_extraction_plan(self):
         prompt = build_outline_prompt("المحاضرة", "الكتاب")
 
@@ -231,6 +399,25 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("словоchunk1", vocabulary_text)
         self.assertIn("словоchunk2", vocabulary_text)
 
+    def test_aggregate_russian_chunks_keeps_fixed_order_when_first_chunk_has_only_dialogue(
+        self,
+    ):
+        prompts = [
+            PromptItem(heading="جزء 1", prompt_text="p1", output_kind="combined"),
+            PromptItem(heading="جزء 2", prompt_text="p2", output_kind="combined"),
+        ]
+        first = self._combined_chunk_text("first").replace(
+            "letters first", "لا يوجد حرف جديد في هذا الجزء."
+        ).replace("rules first", "لا توجد قاعدة جديدة في هذا الجزء.")
+        second = self._combined_chunk_text("second")
+        summary_sections, _ = aggregate_russian_chunks(
+            prompts, [("جزء 1", first), ("جزء 2", second)]
+        )
+        self.assertEqual(
+            ["الحروف الجديدة", "القواعد والتطبيقات", "الحوارات الروسية"],
+            [heading for heading, _ in summary_sections],
+        )
+
     def test_aggregate_russian_chunks_merges_a_rule_split_across_two_chunks(
         self,
     ):
@@ -288,9 +475,46 @@ class WorkflowTests(unittest.TestCase):
             prompts, sections
         )
 
-        headings = [heading for heading, _text in summary_sections]
-        self.assertEqual(["الحروف الجديدة"], headings)
+        # The "nothing new" fallback line is filtered out entirely rather
+        # than being written into the final document as its own heading.
+        self.assertEqual([], summary_sections)
         self.assertEqual("", vocabulary_text)
+
+    def test_aggregate_russian_chunks_drops_empty_bucket_messages_across_chunks(
+        self,
+    ):
+        prompts = [
+            PromptItem(heading="قسم من الدرس", prompt_text="p1", output_kind="combined"),
+            PromptItem(heading="قسم من الدرس", prompt_text="p2", output_kind="combined"),
+        ]
+        sections = [
+            (
+                "قسم من الدرس",
+                "<letters_section>لا يوجد حرف جديد في هذا الجزء.</letters_section>"
+                "<rules_section>لا توجد قاعدة جديدة في هذا الجزء.</rules_section>"
+                "<dialogues_section>لا يوجد حوار تعليمي في هذا الجزء.</dialogues_section>"
+                "<vocabulary_section></vocabulary_section>",
+            ),
+            (
+                "قسم من الدرس",
+                "<letters_section>"
+                "<subheading>الحروف الجديدة</subheading> "
+                "<russian>А а</russian>"
+                "</letters_section>"
+                "<rules_section>لا توجد قاعدة جديدة في هذا الجزء.</rules_section>"
+                "<dialogues_section>لا يوجد حوار تعليمي في هذا الجزء.</dialogues_section>"
+                "<vocabulary_section></vocabulary_section>",
+            ),
+        ]
+
+        summary_sections, _vocabulary_text = aggregate_russian_chunks(
+            prompts, sections
+        )
+
+        headings = dict(summary_sections)
+        self.assertEqual(["الحروف الجديدة"], list(headings))
+        self.assertNotIn("لا يوجد حرف جديد", headings["الحروف الجديدة"])
+        self.assertIn("А а", headings["الحروف الجديدة"])
 
     def test_output_name_advances_to_the_next_free_version(self):
         with tempfile.TemporaryDirectory() as temp_dir:

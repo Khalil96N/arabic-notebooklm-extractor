@@ -7,6 +7,7 @@ from playwright.async_api import BrowserContext, Page
 from app.config.settings import settings
 from app.exporters.file import FileExporter
 from app.models.schemas import PromptItem
+from app.prompts.russian_course_templates import missing_chunk_sections
 from app.services.notebooklm_page import NotebookLMPageClient
 from app.utils.logger import logger
 
@@ -48,12 +49,24 @@ class SectionExtractor:
             await self.current_page.close()
             return []
 
+        is_cumulative_russian_job = any(
+            prompt.output_kind in ("combined", "vocabulary")
+            for prompt in prompts
+        )
+        is_english_course_job = any(
+            prompt.output_kind == "logistics" for prompt in prompts
+        )
+        # Notebook chat is synchronized across tabs. Russian and English
+        # workers must accept only the response carrying their request token,
+        # including recap requests and sequential recovery attempts.
+        strict_request_matching = is_cumulative_russian_job or is_english_course_job
         worker_count = min(
             max(1, settings.PARALLEL_EXTRACTIONS),
             len(prompts),
         )
+        extraction_mode = "sequential" if worker_count == 1 else "parallel"
         logger.info(
-            f"[bold magenta]Starting parallel extraction with "
+            f"[bold magenta]Starting {extraction_mode} extraction with "
             f"{worker_count} tab(s) in the same Chrome window.[/bold magenta]"
         )
 
@@ -86,6 +99,10 @@ class SectionExtractor:
                 FileExporter.save_word_document(
                     completed_sections,
                     output_name,
+                    number_main_headings=not is_english_course_job,
+                    document_title=(
+                        self.lecture_name if is_english_course_job else None
+                    ),
                 )
             except Exception as exc:
                 logger.error(
@@ -111,6 +128,7 @@ class SectionExtractor:
                         page,
                         prompt_item,
                         marker,
+                        **({"strict_marker": True} if strict_request_matching else {}),
                     )
 
                     if section_text is None:
@@ -137,16 +155,31 @@ class SectionExtractor:
                 )
                 fallback_page = worker_pages[0]
                 for index in sorted(failed_indexes):
-                    results[index] = (
-                        await self.extract_with_retries(
-                            fallback_page,
-                            prompts[index],
-                            marker=None,
-                        )
-                        or ""
+                    results[index] = await self.extract_with_retries(
+                        fallback_page,
+                        prompts[index],
+                        marker=(
+                            f"NBX-{index + 1}-{uuid.uuid4().hex[:8]}"
+                            if strict_request_matching else None
+                        ),
+                        **({"strict_marker": True} if strict_request_matching else {}),
                     )
-                    async with save_lock:
-                        await save_completed_sections()
+                    if results[index] is not None:
+                        async with save_lock:
+                            await save_completed_sections()
+
+            self.raise_for_incomplete_cumulative_results(prompts, results)
+            if is_english_course_job:
+                missing = [
+                    prompt.heading for prompt, result in zip(prompts, results)
+                    if result is None
+                ]
+                if missing:
+                    raise RuntimeError(
+                        "English extraction is incomplete. Failed sections: "
+                        + ", ".join(missing)
+                        + ". Any incrementally saved Word file is partial."
+                    )
         finally:
             for page in worker_pages:
                 try:
@@ -159,6 +192,43 @@ class SectionExtractor:
             (prompt.heading, results[index] or "")
             for index, prompt in enumerate(prompts)
         ]
+
+    @staticmethod
+    def raise_for_incomplete_cumulative_results(
+        prompts: list[PromptItem],
+        results: list[str | None],
+    ) -> None:
+        """Abort cumulative exports instead of replacing them with blanks.
+
+        Arabic and English jobs retain their existing best-effort behavior.
+        Russian cumulative jobs contain at least one combined/vocabulary
+        prompt and must be all-or-nothing so a failed chunk cannot overwrite
+        a previously complete lecture in the cumulative state and documents.
+        """
+        is_cumulative = any(
+            prompt.output_kind in ("combined", "vocabulary")
+            for prompt in prompts
+        )
+        if not is_cumulative:
+            return
+
+        missing_indexes = [
+            index
+            for index, result in enumerate(results)
+            if result is None
+        ]
+        if not missing_indexes:
+            return
+
+        missing_labels = ", ".join(
+            f"{index + 1} ({prompts[index].heading})"
+            for index in missing_indexes
+        )
+        raise RuntimeError(
+            "Russian cumulative extraction stopped because these requests "
+            f"did not return complete responses: {missing_labels}. "
+            "Existing cumulative files were left unchanged."
+        )
 
     async def prepare_worker_tabs(self, worker_count: int) -> list[Page]:
         pages = [self.current_page]
@@ -184,39 +254,89 @@ class SectionExtractor:
         page: Page,
         prompt_item: PromptItem,
         marker: str | None = None,
+        *,
+        strict_marker: bool = False,
     ) -> str | None:
         for attempt in range(1, self.MAX_RETRIES + 1):
             try:
                 current_marker = marker
+                if strict_marker and not current_marker:
+                    current_marker = f"NBX-{uuid.uuid4().hex[:12]}"
                 if marker and attempt > 1:
                     current_marker = f"NBX-RETRY-{uuid.uuid4().hex[:10]}"
 
                 prompt_text = prompt_item.prompt_text
                 if current_marker:
-                    prompt_text += (
-                        f"\n\nابدأ بسطر: {prompt_item.heading} "
-                        f"[[{current_marker}]]"
-                    )
+                    if strict_marker:
+                        prompt_text = (
+                            f"اكتب هوية الرد [[{current_marker}]] في أول سطر، "
+                            "ثم أجب عن الطلب التالي كاملاً:\n\n" + prompt_text
+                            + f"\n\nالسطر الأول حرفيًا قبل أي وسم أو عنوان: [[{current_marker}]]"
+                        )
+                    else:
+                        prompt_text += (
+                            f"\n\nابدأ بسطر: {prompt_item.heading} "
+                            f"[[{current_marker}]]"
+                        )
 
                 previous_response = await self.page_client.latest_response(page)
-                await self.page_client.send_prompt(page, prompt_text)
+                await self.page_client.send_prompt(
+                    page, prompt_text,
+                    **({"verify_sent": True} if strict_marker else {}),
+                )
                 section_text = await self.page_client.wait_for_response(
                     page,
                     marker=current_marker,
                     previous_response=previous_response,
+                    **({"strict_marker": True} if strict_marker else {}),
+                    **({"expected_heading": prompt_item.heading} if strict_marker else {}),
                 )
+                if strict_marker and not NotebookLMPageClient.has_response_marker(
+                    section_text, current_marker
+                ):
+                    raise RuntimeError("Response does not match this request's marker.")
                 section_text = self.remove_task_marker(
                     section_text,
                     current_marker,
                 )
-                if not self.is_failed_response(section_text):
+                if strict_marker:
+                    body_without_headings = re.sub(
+                        r"<subheading>.*?</subheading>|(?m:^#{1,6}[^\n]*$)|\[\[NBX-[^\]]+\]\]",
+                        "", section_text, flags=re.IGNORECASE | re.DOTALL,
+                    ).strip()
+                    if prompt_item.output_kind == "summary" and not body_without_headings:
+                        raise RuntimeError("The response contains headings without explanation.")
+                    if section_text.strip() == prompt_item.heading.strip():
+                        raise RuntimeError("The response contains a heading without content.")
+                    if (
+                        prompt_item.output_kind == "summary"
+                        and "<english>" in prompt_item.prompt_text
+                        and not re.search(r"<english>\s*[^<]+</english>", section_text, re.I)
+                    ):
+                        raise RuntimeError("The response is missing the English companion passages.")
+                if not self.is_failed_response(section_text, prompt_item):
                     return section_text
 
-                logger.warning(
-                    f"[bold yellow]NotebookLM returned an invalid response "
-                    f"for '{prompt_item.heading}'. "
-                    f"Retry {attempt}/{self.MAX_RETRIES}...[/bold yellow]"
+                missing = (
+                    missing_chunk_sections(section_text)
+                    if prompt_item.output_kind == "combined"
+                    and section_text
+                    and len(section_text.strip()) > 5
+                    else []
                 )
+                if missing:
+                    logger.warning(
+                        f"[bold yellow]NotebookLM response for "
+                        f"'{prompt_item.heading}' is missing section "
+                        f"tag(s): {', '.join(missing)}. "
+                        f"Retry {attempt}/{self.MAX_RETRIES}...[/bold yellow]"
+                    )
+                else:
+                    logger.warning(
+                        f"[bold yellow]NotebookLM returned an invalid "
+                        f"response for '{prompt_item.heading}'. "
+                        f"Retry {attempt}/{self.MAX_RETRIES}...[/bold yellow]"
+                    )
             except Exception as exc:
                 logger.warning(
                     f"[bold yellow]Request failed for "
@@ -236,14 +356,25 @@ class SectionExtractor:
         return None
 
     @staticmethod
-    def is_failed_response(section_text: str) -> bool:
+    def is_failed_response(
+        section_text: str,
+        prompt_item: PromptItem | None = None,
+    ) -> bool:
         if not section_text or len(section_text.strip()) <= 5:
             return True
         lower_text = section_text.lower()
-        return any(
+        if any(
             phrase in lower_text
             for phrase in SectionExtractor.FAILED_RESPONSE_PHRASES
-        )
+        ):
+            return True
+        if (
+            prompt_item is not None
+            and prompt_item.output_kind == "combined"
+            and missing_chunk_sections(section_text)
+        ):
+            return True
+        return False
 
     @staticmethod
     def remove_task_marker(text: str, marker: str | None = None) -> str:

@@ -9,6 +9,8 @@ from app.prompts.russian_course_templates import (
     build_chunk_prompt,
     build_outline_prompt,
     build_recap_prompt,
+    chunk_response_has_all_sections,
+    missing_chunk_sections,
     split_chunk_response,
 )
 from app.services.notebooklm import NotebookLMService
@@ -98,18 +100,17 @@ class RussianCoursePromptTests(unittest.TestCase):
         )
         section = "\n".join(prompt.prompt_text for prompt in prompts)
 
-        self.assertIn("اعتمد قراءة المعلمة مرة واحدة", section)
-        self.assertIn("احذف إعادة الطلاب", section)
-        self.assertIn("احذف الأسماء والمحاولات الفردية", section)
-        self.assertIn("الحضور ومشكلات الاتصال", section)
+        self.assertIn("اعتمد المعلمة مرة واحدة", section)
+        self.assertIn("احذف تكرار الطلاب", section)
+        self.assertIn("أسماء الطلاب والإدارة والحضور ومشكلات الاتصال", section)
 
     def test_letters_keep_only_small_useful_pronunciation_sample(self):
         _heading, prompt_text, _kind = build_chunk_prompt("")
 
-        self.assertIn("بحد أقصى ستة مقاطع", prompt_text)
-        self.assertIn("احذف السلاسل الطويلة", prompt_text)
-        self.assertIn("لا تشرح خطوات رسم الحرف", prompt_text)
-        self.assertIn("لا تنشئ قائمة مفردات هنا", prompt_text)
+        letters = prompt_text.split("<letters_section>")[1].split("</letters_section>")[0]
+        self.assertIn("أمثلة نطق قليلة", letters)
+        self.assertIn("بلا رسم أو سلاسل تدريب", letters)
+        self.assertNotIn("<vocabulary_item>", letters)
 
     def test_prior_rules_are_passed_as_review_context(self):
         _heading, prompt_text, _kind = build_chunk_prompt(
@@ -118,7 +119,28 @@ class RussianCoursePromptTests(unittest.TestCase):
 
         self.assertIn("جنس الأسماء", prompt_text)
         self.assertIn("ضمائر الملكية", prompt_text)
-        self.assertIn('سطرًا يبدأ بـ "مراجعة:"', prompt_text)
+        self.assertIn("للمكرر اكتب مراجعة وأضف الجديد فقط", prompt_text)
+
+    def test_review_context_is_bounded_and_keeps_recent_rules(self):
+        names = [f"قاعدة قديمة رقم {i} " + "شرح طويل " * 20 for i in range(50)]
+        names.append("التمييز الجديد بين المفرد والجمع في فعل الإعجاب (Мне нравится / Мне нравятся)")
+        _, prompt, _ = build_chunk_prompt("", names)
+        context = prompt.split("قواعد سابقة: ", 1)[1].split("</rules_section>", 1)[0]
+        self.assertLessEqual(len(prompt), 1800)
+        self.assertIn("التمييز الجديد بين المفرد والجمع في فعل الإعجاب", context)
+        self.assertNotIn("قاعدة قديمة رقم 0 ", context)
+
+    def test_full_chunk_leaves_room_for_response_id_with_long_boundaries(self):
+        context = build_boundary_context("Начало " * 200, "Конец " * 200)
+        _, prompt, _ = build_chunk_prompt(context, ["قاعدة طويلة " * 30] * 100)
+        marker = "NBX-RETRY-1234567890"
+        wrapped = (f"اكتب هوية الرد [[{marker}]] في أول سطر، ثم أجب عن الطلب التالي كاملاً:\n\n"
+                   + prompt + f"\n\nالسطر الأول حرفيًا قبل أي وسم أو عنوان: [[{marker}]]")
+        self.assertLessEqual(len(prompt), 1800)
+        self.assertLess(len(wrapped), 2000)
+        for tag in ("letters_section", "rules_section", "dialogues_section", "vocabulary_section"):
+            self.assertIn(f"<{tag}>", prompt)
+            self.assertIn(f"</{tag}>", prompt)
 
     def test_dialogue_and_vocabulary_sections_have_distinct_schemas(self):
         _heading, prompt_text, _kind = build_chunk_prompt("")
@@ -135,6 +157,19 @@ class RussianCoursePromptTests(unittest.TestCase):
         self.assertIn("<vocabulary_item>", vocabulary_section)
         self.assertIn("<category>", vocabulary_section)
         self.assertIn("<english>", vocabulary_section)
+        self.assertIn("العبارة كاملة", vocabulary_section)
+        self.assertIn("الكلمات ذات المعنى المستقل", vocabulary_section)
+
+    def test_vocabulary_includes_useful_teacher_speech_beyond_lesson_text(self):
+        _heading, prompt_text, _kind = build_chunk_prompt("")
+        vocabulary_section = prompt_text.split("<vocabulary_section>")[1].split(
+            "</vocabulary_section>"
+        )[0]
+
+        self.assertIn("من كلام المعلمة الروسي أثناء الشرح", vocabulary_section)
+        self.assertIn("حتى إن لم تقرأها من النص", vocabulary_section)
+        self.assertIn("استبعد الكلام الإداري", vocabulary_section)
+        self.assertIn("تكرار الطلاب", vocabulary_section)
 
     def test_recap_prompt_is_scoped_to_the_boundary_it_is_given(self):
         heading, prompt_text, output_kind = build_recap_prompt(
@@ -176,6 +211,51 @@ class SplitChunkResponseTests(unittest.TestCase):
         self.assertEqual("", parts["rules"])
         self.assertEqual("", parts["dialogues"])
         self.assertEqual("", parts["vocabulary"])
+
+
+class MissingChunkSectionsTests(unittest.TestCase):
+    def test_complete_response_has_no_missing_sections(self):
+        response = (
+            "<letters_section>لا يوجد حرف جديد في هذا الجزء.</letters_section>"
+            "<rules_section>لا توجد قاعدة جديدة في هذا الجزء.</rules_section>"
+            "<dialogues_section>لا يوجد حوار تعليمي في هذا الجزء.</dialogues_section>"
+            "<vocabulary_section></vocabulary_section>"
+        )
+
+        self.assertEqual([], missing_chunk_sections(response))
+        self.assertTrue(chunk_response_has_all_sections(response))
+
+    def test_a_dropped_section_tag_is_reported_as_missing(self):
+        response = (
+            "<letters_section>لا يوجد حرف جديد في هذا الجزء.</letters_section>"
+            "<dialogues_section>لا يوجد حوار تعليمي في هذا الجزء.</dialogues_section>"
+            "<vocabulary_section></vocabulary_section>"
+        )
+
+        self.assertEqual(["rules_section"], missing_chunk_sections(response))
+        self.assertFalse(chunk_response_has_all_sections(response))
+
+    def test_closing_tag_before_opening_tag_is_still_malformed(self):
+        response = (
+            "</letters_section><letters_section>"
+            "<rules_section>لا توجد قاعدة جديدة.</rules_section>"
+            "<dialogues_section>لا يوجد حوار.</dialogues_section>"
+            "<vocabulary_section></vocabulary_section>"
+        )
+
+        self.assertIn("letters_section", missing_chunk_sections(response))
+        self.assertFalse(chunk_response_has_all_sections(response))
+
+    def test_empty_response_is_missing_every_section(self):
+        self.assertEqual(
+            [
+                "letters_section",
+                "rules_section",
+                "dialogues_section",
+                "vocabulary_section",
+            ],
+            missing_chunk_sections(""),
+        )
 
 
 class RussianCourseServiceTests(unittest.IsolatedAsyncioTestCase):

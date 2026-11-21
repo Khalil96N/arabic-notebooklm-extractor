@@ -42,10 +42,86 @@ class EnglishCoursePromptTests(unittest.TestCase):
         section = prompts[0].prompt_text
 
         self.assertIn("مصدر الفيديو الإنجليزي المحدد فقط", outline)
-        self.assertIn("<english>", section)
-        self.assertIn("الشرح والإضافات بالعربية", section)
+        self.assertIn("ملاحظات دراسية عربية مفصلة", section)
+        self.assertIn("بين أقواس", section)
+        self.assertIn("<equation>", section)
+        self.assertIn("<logistics>", section)
+        self.assertNotIn("<english>", section)
+        self.assertIn("درجات الحرية (Degrees of Freedom)", section)
+        self.assertIn("لا تنقل جمل الدكتور الإنجليزية", section)
+        self.assertIn("لا تقصر المفردات على المصطلحات التقنية", section)
+        self.assertIn("لا تختلق اقتباساً", section)
+        self.assertIn("كل فكرة فرعية ومثال وخطوة ومقارنة ومعادلة", section)
         self.assertNotIn("بسم الله", section)
         self.assertNotIn("بما أن هذه الفقرة هي خاتمة المحاضرة", section)
+
+    def test_english_outline_filters_noise_and_requests_scientific_review(self):
+        prompt = build_outline_prompt("Robotics Fundamentals")
+
+        self.assertIn("تجاهل التحية والتعريف الشخصي", prompt)
+        self.assertIn("المعلومة التنظيمية التي يحتاج الطالب", prompt)
+        self.assertIn("3-5 أسئلة مراجعة علمية", prompt)
+        self.assertIn("لا تكتب الشرح أو إجابات الأسئلة الآن", prompt)
+        self.assertIn("لا تنشئ ترقيمًا تسلسليًا للعناوين", prompt)
+        self.assertIn("وفق أرقام المصدر", prompt)
+
+    def test_english_section_avoids_added_examples_and_follow_up_questions(self):
+        prompt = PromptGenerator.generate_prompts(
+            [ExtractionItem(title="Kinematics", level=1)],
+            "english",
+        )[0].prompt_text
+
+        self.assertIn("اعتمد أمثلة المحاضر فقط", prompt)
+        self.assertIn("لا تضف أمثلة جديدة من عندك", prompt)
+        self.assertIn("لا تُقحم مصطلحات أو أفكاراً غير واردة فيه", prompt)
+        self.assertIn("لا تطرح أسئلة متابعة", prompt)
+
+    def test_english_prompts_place_recap_before_review_questions(self):
+        prompts = PromptGenerator.generate_prompts(
+            [
+                ExtractionItem(title="Kinematics", level=1),
+                ExtractionItem(
+                    title="ما العلاقة بين الحركة والمفاصل؟",
+                    level=2,
+                    kind="end_question",
+                ),
+            ],
+            "english",
+        )
+
+        self.assertEqual(
+            [
+                "Kinematics",
+                "خلاصة المحاضرة",
+                "سؤال للمراجعة: ما العلاقة بين الحركة والمفاصل؟",
+                "استخراج المعلومات التنظيمية",
+            ],
+            [prompt.heading for prompt in prompts],
+        )
+        self.assertIn("5-8 نقاط واضحة", prompts[1].prompt_text)
+        self.assertIn("إجابة تعليمية عربية دقيقة", prompts[2].prompt_text)
+        self.assertNotIn("<english>", prompts[2].prompt_text)
+        self.assertEqual("logistics", prompts[3].output_kind)
+        self.assertIn("المحاضرة الإنجليزية المحددة كاملة", prompts[3].prompt_text)
+        self.assertIn(
+            "اكتب فقط المعلومات الصريحة في المصدر",
+            prompts[3].prompt_text,
+        )
+        self.assertIn("كتلة فارغة تماماً", prompts[3].prompt_text)
+
+    def test_english_topic_headings_keep_source_numbers_without_renumbering(self):
+        prompts = PromptGenerator.generate_prompts(
+            [
+                ExtractionItem(title="5. Dynamics", level=1),
+                ExtractionItem(title="2. Kinematics", level=1),
+            ],
+            "english",
+        )
+
+        self.assertEqual(
+            ["2. Kinematics", "5. Dynamics"],
+            [prompt.heading for prompt in prompts[:2]],
+        )
 
     def test_arabic_is_the_default_prompt_profile(self):
         prompt = PromptGenerator.generate_prompts(

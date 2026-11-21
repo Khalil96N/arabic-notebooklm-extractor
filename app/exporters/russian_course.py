@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import json
 import re
-import unicodedata
 from pathlib import Path
 
 from app.config.settings import settings
-from app.exporters.common import clean_spacing, ensure_output_dir
+from app.exporters.common import clean_spacing, ensure_output_dir, study_text_key
 from app.utils.logger import logger
 
 
@@ -22,10 +21,14 @@ CATEGORY_ORDER = (
     "العائلة",
     "الأشخاص والمهن",
     "البيت والأثاث",
+    "الملابس والأغراض الشخصية",
     "الأماكن والمواصلات",
     "الطعام والشراب",
     "الزمن والتاريخ",
     "الطقس والطبيعة",
+    "الجسم والصحة",
+    "الثقافة والألعاب",
+    "العلوم والتقنية",
     "الأعداد والكميات",
     "الأفعال",
     "الصفات",
@@ -144,70 +147,209 @@ def parse_vocabulary(text: str) -> list[dict]:
             continue
         if not re.search(r"[А-Яа-яЁё]", entry["russian"]):
             continue
-        combined = f'{entry["category"]} {entry["arabic"]}'.casefold()
-        if any(
-            marker in combined
-            for marker in (
-                "مقطع صوتي",
-                "مقاطع صوتية",
-                "تدريب صوتي",
-                "تدريب نطق بلا معنى",
-            )
-        ):
+        if should_exclude_vocabulary_entry(entry):
             continue
-        entry["category"] = canonical_category(entry["category"])
+        entry["category"] = category_for_vocabulary_entry(entry)
         items.append(entry)
     return items
 
 
 def russian_key(value: str) -> str:
-    normalized = unicodedata.normalize("NFD", value.casefold())
-    normalized = "".join(
-        character
-        for character in normalized
-        if unicodedata.category(character) != "Mn"
-    )
-    normalized = unicodedata.normalize("NFC", normalized)
+    normalized = study_text_key(value)
     normalized = re.sub(r"[.!?…،؛:;]+$", "", normalized.strip())
     return re.sub(r"\s+", " ", normalized)
 
 
+def _canonical_category_tokens(text: str) -> set[str]:
+    """Tokenize a category label, stripping the definite article "ال".
+
+    Whole-word matching against short family terms (أم/أب/أخ/أخت) needs this
+    so "الأم" still matches "أم" as a word, while "أماكن" or "الأماكن"
+    ("places") does not: that word merely starts with the letters "أم" as a
+    substring, which is how it used to be mis-routed into "العائلة".
+    """
+    tokens = re.findall(r"[^\W\d_]+", text, flags=re.UNICODE)
+    return {
+        token[2:] if token.startswith("ال") and len(token) > 3 else token
+        for token in tokens
+    }
+
+
 def canonical_category(value: str) -> str:
-    text = (value or "").strip().casefold()
+    original = (value or "").strip()
+    if original in CATEGORY_ORDER:
+        return original
+    text = original.casefold()
+    tokens = _canonical_category_tokens(text)
+
+    # Short family terms are matched as whole words only: checking them as a
+    # substring (the old behaviour) makes any word that merely starts with
+    # the same two letters as "أم" (e.g. "أماكن"/places) match "العائلة" by
+    # accident.
+    if tokens & {"أب", "أم", "أخ", "أخت"}:
+        return "العائلة"
+
+    # "صفات" and "وصف" contain "صف" but are not classroom labels.
+    if tokens & {"صفة", "صفات", "وصف", "أوصاف", "لون", "ألوان"}:
+        return "الصفات"
+    if "صف" in tokens:
+        return "الصف والتعليمات"
+
     mappings = (
         (("تحي", "وداع", "شكر", "ترحيب"), "التحيات والوداعات"),
-        (("صف", "تعليم", "اقرأ", "اكتب", "معلم", "درس"), "الصف والتعليمات"),
+        (("شخص", "مهن", "طالب", "طبيب", "اسم علم", "معلم", "أستاذ", "صديق"), "الأشخاص والمهن"),
+        (("تعليم", "اقرأ", "اكتب", "درس"), "الصف والتعليمات"),
         (("ضمير", "إشارة", "ملكية"), "الضمائر وأسماء الإشارة"),
         (("سؤال", "جواب", "استفهام"), "الأسئلة والأجوبة"),
-        (("عائل", "أسرة", "أب", "أم", "أخ", "أخت"), "العائلة"),
-        (("شخص", "مهن", "طالب", "طبيب", "اسم علم"), "الأشخاص والمهن"),
+        (("عائل", "أسرة"), "العائلة"),
         (("بيت", "منزل", "أثاث", "غرفة"), "البيت والأثاث"),
-        (("مكان", "مواصل", "مدينة", "جامعة", "مدرسة"), "الأماكن والمواصلات"),
+        (("مكان", "أماكن", "مواصل", "مدينة", "جامعة", "مدرسة"), "الأماكن والمواصلات"),
         (("طعام", "شراب", "فاكه", "أكل"), "الطعام والشراب"),
         (("زمن", "وقت", "تاريخ", "يوم", "غد", "صباح"), "الزمن والتاريخ"),
-        (("طقس", "طبيعة", "برد", "حر", "ثلج"), "الطقس والطبيعة"),
+        (("طقس", "طبيعة"), "الطقس والطبيعة"),
         (("عدد", "رقم", "كمية", "قياس"), "الأعداد والكميات"),
         (("فعل",), "الأفعال"),
         (("صفة",), "الصفات"),
-        (("قاعد", "مصطلح", "نحو", "لغة"), "القواعد والمصطلحات"),
+        (("قاعد", "مصطلح", "نحو", "لغة", "حرف جر", "حرف عطف", "حرف"), "القواعد والمصطلحات"),
         (("عبار", "تعبير"), "عبارات عامة"),
     )
+    if tokens & {"برد", "حر", "ثلج"}:
+        return "الطقس والطبيعة"
     for keywords, category in mappings:
         if any(keyword in text for keyword in keywords):
             return category
     return "أخرى"
 
 
+_NON_STUDY_VOCABULARY_KEYS = frozenset(
+    russian_key(value)
+    for value in (
+        "Перерыв",
+        "Отдохните",
+        "Всё правильно",
+        "Молодцы",
+    )
+)
+
+_PRONOUN_VOCABULARY_KEYS = frozenset(
+    russian_key(value)
+    for value in (
+        "Я",
+        "Ты",
+        "Он",
+        "Она",
+        "Оно",
+        "Мы",
+        "Вы",
+        "Они",
+        "Вам",
+    )
+)
+
+_PEOPLE_VOCABULARY_KEYS = frozenset(
+    russian_key(value)
+    for value in (
+        "Преподаватель",
+        "Студент",
+        "Друг",
+    )
+)
+
+_GRAMMAR_VOCABULARY_KEYS = frozenset(
+    russian_key(value)
+    for value in (
+        "Буква",
+        "Большая",
+        "Маленькая",
+        "Но",
+    )
+)
+
+
+def should_exclude_vocabulary_entry(entry: dict) -> bool:
+    """Use the same filter for new extraction and previously stored rows."""
+    # A user-reviewed legacy word is study material even when a generic
+    # extraction filter would classify it as administrative classroom speech.
+    if entry.get("study_role") == "legacy_study_word":
+        return False
+    key = russian_key(entry.get("russian", ""))
+    if key in _NON_STUDY_VOCABULARY_KEYS or re.search(r"\bперерыв\b", key):
+        return True
+    if entry.get("study_role") == "sound_drill":
+        return True
+    context = study_text_key(" ".join(
+        str(entry.get(field, "")) for field in ("category", "arabic", "english")
+    ))
+    return any(marker in context for marker in (
+        "مقطع صوتي", "مقاطع صوتية", "مقطع تدريبي", "مقاطع تدريبية",
+        "تدريب صوتي", "تدريب نطق بلا معنى", "practice word",
+        "practice syllable", "sound drill", "meaningless syllable",
+    ))
+
+
+def category_for_vocabulary_entry(entry: dict) -> str:
+    """Choose a stable topical category using all available semantics."""
+    if russian_key(entry.get("russian", "")) in _PRONOUN_VOCABULARY_KEYS:
+        return "الضمائر وأسماء الإشارة"
+    if russian_key(entry.get("russian", "")) in _PEOPLE_VOCABULARY_KEYS:
+        return "الأشخاص والمهن"
+    if russian_key(entry.get("russian", "")) in _GRAMMAR_VOCABULARY_KEYS:
+        return "القواعد والمصطلحات"
+    explicit_category = entry.get("category", "")
+    if explicit_category in CATEGORY_ORDER and explicit_category != "أخرى":
+        return explicit_category
+    context = " ".join(
+        str(entry.get(field, ""))
+        for field in ("category", "arabic", "english")
+    )
+    return canonical_category(context)
+
+
 def _merge_text(old: str, new: str) -> str:
-    old = old.strip()
-    new = new.strip()
-    if not old:
-        return new
-    if not new or new.casefold() in old.casefold():
-        return old
-    if old.casefold() in new.casefold():
-        return new
-    return f"{old} / {new}"
+    # Split alternatives, not a slash inside a parenthetical explanation
+    # such as "You (formal / plural)". Keep distinct meanings in order.
+    parts = []
+    seen = set()
+    for value in (old, new):
+        start = depth = 0
+        for index, character in enumerate(value + "/"):
+            if character in "([":
+                depth += 1
+            elif character in ")]":
+                depth = max(0, depth - 1)
+            if character == "/" and (depth == 0 or index == len(value)):
+                part = value[start:index].strip()
+                key = study_text_key(part)
+                if key and key not in seen:
+                    parts.append(part)
+                    seen.add(key)
+                start = index + 1
+    return " / ".join(parts)
+
+
+def remove_lecture_vocabulary(state: dict, lecture_number: int) -> None:
+    """Drop one lecture's prior contribution from the vocabulary table.
+
+    Re-running the same lecture must replace its rows, not merge a second
+    copy of the same words on top of the ones an earlier attempt left
+    behind. A word that also belongs to another lecture keeps its row, with
+    just this lecture number removed from it.
+    """
+    remaining = []
+    for entry in state["vocabulary"]:
+        lectures = {
+            int(value)
+            for value in entry.get("lectures", [])
+            if str(value).isdigit()
+        }
+        if lecture_number not in lectures:
+            remaining.append(entry)
+            continue
+        lectures.discard(lecture_number)
+        if lectures or entry.get("source_note"):
+            entry["lectures"] = sorted(lectures)
+            remaining.append(entry)
+    state["vocabulary"] = remaining
 
 
 def merge_vocabulary(
@@ -246,6 +388,10 @@ def merge_vocabulary(
         lectures.add(lecture_number)
         current["lectures"] = sorted(lectures)
         for field in ("pronunciation", "arabic", "english"):
+            # A human-reviewed reading must not acquire an unreviewed,
+            # conflicting transliteration when the word recurs next lesson.
+            if field == "pronunciation" and current.get("pronunciation_reviewed"):
+                continue
             current[field] = _merge_text(
                 current.get(field, ""),
                 new_entry.get(field, ""),
@@ -254,11 +400,55 @@ def merge_vocabulary(
     state["next_order"] = next_order
 
 
-def prior_rule_names(state: dict) -> list[str]:
+def normalize_vocabulary_state(state: dict) -> None:
+    """Apply deterministic filtering and categorization to stored rows."""
+    retained = []
+    seen: dict[str, dict] = {}
+    for entry in state.get("vocabulary", []):
+        if should_exclude_vocabulary_entry(entry):
+            continue
+        for field in ("pronunciation", "arabic", "english"):
+            if field in entry:
+                entry[field] = _merge_text("", entry[field])
+        entry["category"] = category_for_vocabulary_entry(entry)
+        key = russian_key(entry.get("russian", ""))
+        previous = seen.get(key)
+        if previous is not None:
+            previous["lectures"] = sorted({
+                *previous.get("lectures", []), *entry.get("lectures", [])
+            })
+            for field in ("arabic", "english"):
+                previous[field] = _merge_text(
+                    previous.get(field, ""), entry.get(field, "")
+                )
+            if not previous.get("pronunciation_reviewed"):
+                if entry.get("pronunciation_reviewed"):
+                    previous["pronunciation"] = entry.get("pronunciation", "")
+                    previous["pronunciation_reviewed"] = True
+                else:
+                    previous["pronunciation"] = _merge_text(
+                        previous.get("pronunciation", ""),
+                        entry.get("pronunciation", ""),
+                    )
+            continue
+        seen[key] = entry
+        retained.append(entry)
+    state["vocabulary"] = retained
+
+
+def prior_rule_names(
+    state: dict,
+    exclude_lecture_number: int | None = None,
+) -> list[str]:
     names = []
     seen = set()
     lectures = sorted(
-        state.get("lectures", {}).values(),
+        (
+            lecture
+            for lecture in state.get("lectures", {}).values()
+            if exclude_lecture_number is None
+            or int(lecture.get("lecture_number", 0)) != exclude_lecture_number
+        ),
         key=lambda item: int(item.get("lecture_number", 0)),
     )
     for lecture in lectures:
@@ -279,11 +469,30 @@ def prior_rule_names(state: dict) -> list[str]:
                 ):
                     seen.add(key)
                     names.append(cleaned)
-    return names[:40]
+    # Recent lessons are the ones the teacher is most likely to review.
+    # Keeping only the first forty titles forgets all later grammar.
+    return names[-40:]
 
 
-def get_prior_rule_names() -> list[str]:
-    return prior_rule_names(load_state())
+def get_prior_rule_names(lecture_name: str | None = None) -> list[str]:
+    """Return rule names from prior lectures, excluding `lecture_name` itself.
+
+    Re-processing an already-stored lecture must not treat that lecture's
+    own earlier attempt as a "previous lecture" whose rules now need only a
+    one-line review; excluding it here keeps its rules explained in full.
+    """
+    state = load_state()
+    exclude_lecture_number = None
+    if lecture_name is not None:
+        used_numbers = {
+            int(value)
+            for value in state.get("lectures", {})
+            if str(value).isdigit()
+        }
+        exclude_lecture_number = lecture_number_from_name(
+            lecture_name, used_numbers
+        )
+    return prior_rule_names(state, exclude_lecture_number=exclude_lecture_number)
 
 
 def _set_direction(paragraph, *, rtl: bool) -> None:
@@ -375,11 +584,27 @@ def _configure_document(document, *, landscape: bool = False) -> None:
 
 def _add_title(document, title_text: str, introduction: str) -> None:
     from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
     from docx.shared import Pt
 
     title = document.add_paragraph(style="Title")
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
     _set_direction(title, rtl=True)
+    # Word's built-in Title style can add a colored bottom border.  Override
+    # it on the paragraph so Arabic course exports use typography and spacing
+    # for hierarchy without an unrelated decorative rule.
+    properties = title._p.get_or_add_pPr()
+    borders = properties.find(qn("w:pBdr"))
+    if borders is None:
+        borders = OxmlElement("w:pBdr")
+        properties.append(borders)
+    for edge_name in ("top", "left", "bottom", "right", "between", "bar"):
+        edge = borders.find(qn(f"w:{edge_name}"))
+        if edge is None:
+            edge = OxmlElement(f"w:{edge_name}")
+            borders.append(edge)
+        edge.set(qn("w:val"), "nil")
     title.paragraph_format.space_after = Pt(8)
     run = title.add_run(title_text)
     _format_run(title, run, size=22, rtl=True, bold=True)
@@ -400,13 +625,21 @@ def _normalize_summary_lines(text: str) -> list[str]:
         "translation",
         "highlight",
     )
-    for closing in tags:
-        for opening in tags:
-            text = re.sub(
-                rf"(?i)</{closing}>\s*<{opening}>",
-                f"</{closing}>\n<{opening}>",
-                text,
-            )
+    # NotebookLM often writes a subheading, its prose explanation and the
+    # first Russian example on one physical line. Put every semantic tag on
+    # its own line so Word can style the heading and each Russian card
+    # independently instead of flattening the whole rule into one paragraph.
+    tag_names = "|".join(tags)
+    text = re.sub(
+        rf"(?i)\s*(<(?:(?:{tag_names}))>)\s*",
+        r"\n\1",
+        text,
+    )
+    text = re.sub(
+        rf"(?i)\s*(</(?:(?:{tag_names}))>)\s*",
+        r"\1\n",
+        text,
+    )
     return [line.strip() for line in text.splitlines() if line.strip()]
 
 
@@ -519,9 +752,14 @@ def save_summary_document(state: dict, max_lecture: int) -> Path:
     )
     document = Document()
     _configure_document(document)
+    title_text = (
+        "ملخص كورس اللغة الروسية المحاضرة الأولى"
+        if max_lecture == 1
+        else f"ملخص كورس اللغة الروسية المحاضرات 1 إلى {max_lecture}"
+    )
     _add_title(
         document,
-        f"ملخص كورس اللغة الروسية المحاضرات 1 إلى {max_lecture}",
+        title_text,
         "ملخص تراكمي مرتب للحروف والقواعد والحوارات والخلاصة والواجب. "
         "توجد المفردات الكاملة في جدول منفصل.",
     )
@@ -606,6 +844,16 @@ def _set_repeat_table_header(row) -> None:
     properties.append(header)
 
 
+def _keep_table_row_together(row) -> None:
+    """Prevent a vocabulary entry from being split across pages."""
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+
+    properties = row._tr.get_or_add_trPr()
+    if properties.find(qn("w:cantSplit")) is None:
+        properties.append(OxmlElement("w:cantSplit"))
+
+
 def _set_cell_text(
     cell,
     value: str,
@@ -637,19 +885,44 @@ def _set_cell_text(
 
 
 def save_vocabulary_document(state: dict, max_lecture: int) -> Path:
+    """Default to the requested simple, reviewed table with lecture numbers.
+
+    The optional lemma dictionaries and original extraction state stay intact.
+    """
+    from app.services.russian_flat_vocabulary import review_vocabulary
+    from app.exporters.russian_flat_vocabulary import save_flat_document
+    ensure_output_dir()
+    review = review_vocabulary(state["vocabulary"])
+    references = list(settings.OUTPUT_DIR.glob("جدول مفردات اللغة الروسية - المحاضرات 1-*.docx"))
+    references = [p for p in references if re.search(r"1-\d+\.docx$", p.name)]
+    if references:
+        reference = max(references, key=lambda p:int(re.search(r"1-(\d+)\.docx$", p.name).group(1)))
+        return save_flat_document(review, max_lecture, settings.OUTPUT_DIR, reference)
+    reviewed_state = dict(state, vocabulary=[dict(r, russian=r["display_russian"]) for r in review["vocabulary"]])
+    return save_legacy_vocabulary_document(reviewed_state, max_lecture, reviewed=True)
+
+
+def save_legacy_vocabulary_document(state: dict, max_lecture: int, *, reviewed: bool = False) -> Path:
     from docx import Document
     from docx.shared import Cm
 
     path = settings.OUTPUT_DIR / (
-        f"جدول مفردات اللغة الروسية - المحاضرات 1-{max_lecture}.docx"
+        f"جدول مفردات اللغة الروسية - المحاضرات 1-{max_lecture}"
+        + (" - مراجعة.docx" if reviewed else ".docx")
     )
     document = Document()
     _configure_document(document, landscape=True)
+    title_text = (
+        "جدول مفردات اللغة الروسية المحاضرة الأولى"
+        if max_lecture == 1
+        else f"جدول مفردات اللغة الروسية المحاضرات 1 إلى {max_lecture}"
+    )
     _add_title(
         document,
-        f"جدول مفردات اللغة الروسية المحاضرات 1 إلى {max_lecture}",
+        title_text,
         "يجمع الكلمات والعبارات الروسية مرة واحدة، مع اللفظ العربي "
-        "والمعنى بالعربية والإنجليزية وأرقام المحاضرات.",
+        "والمعنى بالعربية والإنجليزية وأرقام المحاضرات. الكلمات المضافة "
+        "من المرجع السابق مميزة بعبارة «الجدول القديم» لأن ترقيمه مختلف.",
     )
 
     table = document.add_table(rows=1, cols=6)
@@ -661,11 +934,14 @@ def save_vocabulary_document(state: dict, max_lecture: int) -> Path:
         "اللفظ بالعربية",
         "المعنى بالعربية",
         "English meaning",
-        "المحاضرات",
+        "المحاضرات / المصدر",
     )
-    widths = (Cm(1), Cm(5.5), Cm(4.5), Cm(6), Cm(5.5), Cm(2.4))
+    widths = (Cm(1.06), Cm(6.6), Cm(4.23), Cm(5.47), Cm(4.94), Cm(2.91))
+    for index, width in enumerate(widths):
+        table.columns[index].width = width
     header_row = table.rows[0]
     _set_repeat_table_header(header_row)
+    _keep_table_row_together(header_row)
     for index, cell in enumerate(header_row.cells):
         cell.width = widths[index]
         _shade_cell(cell, "1F4E79")
@@ -694,6 +970,7 @@ def save_vocabulary_document(state: dict, max_lecture: int) -> Path:
         category = canonical_category(entry.get("category", ""))
         if category != current_category:
             category_row = table.add_row()
+            _keep_table_row_together(category_row)
             merged = category_row.cells[0]
             for cell in category_row.cells[1:]:
                 merged = merged.merge(cell)
@@ -705,16 +982,20 @@ def save_vocabulary_document(state: dict, max_lecture: int) -> Path:
                 bold=True,
                 size=11,
             )
+            merged.paragraphs[0].paragraph_format.keep_with_next = True
             current_category = category
 
         row_number += 1
         row = table.add_row()
+        _keep_table_row_together(row)
         if row_number % 2 == 0:
             for cell in row.cells:
                 _shade_cell(cell, "F5F9FC")
         lectures = " + ".join(
             str(number) for number in sorted(entry.get("lectures", []))
         )
+        if not lectures:
+            lectures = entry.get("source_note", "")
         values = (
             str(row_number),
             entry.get("russian", ""),
@@ -728,9 +1009,9 @@ def save_vocabulary_document(state: dict, max_lecture: int) -> Path:
             _set_cell_text(
                 cell,
                 values[index],
-                rtl=index not in (1, 4),
+                rtl=index not in (0, 1, 4, 5),
                 bold=index == 1,
-                size=10.25,
+                size=11.5 if index == 1 else (9.5 if index == 0 else 10.25),
             )
 
     document.save(path)
@@ -762,11 +1043,13 @@ def update_cumulative_outputs(
             for heading, text in summary_sections
         ],
     }
+    remove_lecture_vocabulary(state, lecture_number)
     merge_vocabulary(
         state,
         parse_vocabulary(vocabulary_text),
         lecture_number,
     )
+    normalize_vocabulary_state(state)
     save_state(state)
     max_lecture = max(
         int(number) for number in state["lectures"]

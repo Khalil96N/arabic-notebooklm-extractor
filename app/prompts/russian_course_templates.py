@@ -47,42 +47,31 @@ OUTLINE_PROMPT_TEMPLATE = """حلّل مصدر درس اللغة الروسية 
 
 
 SECTION_BOUNDARY_TEMPLATE = """
-حدود هذا الجزء داخل الدرس: ابدأ عند العبارة «{start_hint}» وانته عند العبارة «{end_hint}». التزم بما بينهما فقط، ولا تكرر الجزء السابق أو تنتقل إلى الجزء التالي."""
+ابدأ عند «{start_hint}» وانته عند «{end_hint}». التزم بهذا الجزء فقط."""
 
 
-CHUNK_PROMPT_TEMPLATE = """استخرج من تسجيل درس اللغة الروسية المحدد أربعة أنواع من المحتوى معاً ضمن الجزء المحدد التالي من الدرس فقط.
+CHUNK_PROMPT_TEMPLATE = """استخرج الجزء المحدد من الروسية في أربعة أقسام:
 {boundary_context}
-
-قواعد عامة لكل الأقسام الأربعة: اعتمد قراءة المعلمة مرة واحدة، واحذف إعادة الطلاب. احذف الأسماء والمحاولات الفردية والمدح وأوامر الإعادة. احذف الحضور ومشكلات الاتصال والاستراحة والتنظيم والحديث الجانبي. التزم بحدود هذا الجزء فقط ولا تخترع محتوى من خارجها. لا تستخدم جداول Markdown ولا تكتب سؤال متابعة في أي قسم.
-
-اكتب ردك بأربعة أقسام متتابعة بهذا الترتيب حرفياً، كل قسم كامل بين وسمه فقط، ولا تحذف وسم قسم حتى لو كان فارغاً:
+اعتمد المعلمة مرة واحدة؛ احذف تكرار الطلاب وأسماء الطلاب والإدارة والحضور ومشكلات الاتصال. لا تخترع. لكل نص روسي لفظ عربي ومعنى عربي (P=پ V=ڤ G=گ). بلا جداول. حافظ على الوسوم والأقسام حتى إن كانت فارغة:
 
 <letters_section>
-الحروف الجديدة فقط. تحت <subheading>الحروف الجديدة</subheading>، لكل حرف: الشكل الكبير والصغير معاً مثل <russian>А а</russian>، ثم <pronunciation>اسم الحرف وصوته داخل الكلمات</pronunciation>، ثم <translation>وظيفته أو أقرب وصف عربي لصوته</translation>. <highlight>ملاحظة نطق: ...</highlight> فقط لفرق صوتي مهم. لا تشرح خطوات رسم الحرف. بحد أقصى ستة مقاطع لكل ساكن أو مقارنتين لكل متحرك؛ احذف السلاسل الطويلة العشوائية. لا تنشئ قائمة مفردات هنا. إذا لم يظهر حرف جديد، اكتب فقط: لا يوجد حرف جديد في هذا الجزء.
+الحروف الجديدة فقط: <subheading>الحرف</subheading><russian>كبير وصغير</russian><pronunciation>الاسم والصوت بالعربي</pronunciation><translation>وصف الصوت والفرق عن المشابه</translation>. بلا رسم أو سلاسل تدريب، وأمثلة نطق قليلة عند الحاجة.
 </letters_section>
 
 <rules_section>
-القواعد وتطبيقاتها فقط. لكل قاعدة: <subheading>اسم القاعدة المختصر</subheading> ثم شرح عربي فصيح قصير يبيّن متى تُستخدم، ثم من مثالين إلى أربعة أمثلة جديدة فقط، كل مثال: <russian>النص الروسي</russian> <pronunciation>اللفظ</pronunciation> <translation>المعنى</translation>.
-
-{review_context}
-
-لا تنشئ قائمة مفردات هنا، ولا تكرر شرح القاعدة بسبب كثرة تطبيق الطلاب. إذا لم تظهر قاعدة جديدة، اكتب فقط: لا توجد قاعدة جديدة في هذا الجزء.
+<subheading>القاعدة</subheading> شرح عربي ومتى تستخدم، و2–4 أمثلة من التسجيل: <russian>...</russian><pronunciation>...</pronunciation><translation>...</translation>. للمكرر اكتب مراجعة وأضف الجديد فقط. {review_context}
 </rules_section>
 
 <dialogues_section>
-الحوارات التعليمية النموذجية فقط. ابدأ بـ <subheading>الحوارات الروسية</subheading>، ولكل حوار عنوان قصير ثم جمله الفريدة بترتيب المعلمة، بصيغة A وB فقط:
-<speaker>A</speaker> <russian>الجملة الصحيحة</russian> <pronunciation>اللفظ</pronunciation> <translation>المعنى</translation>
-
-لا تعامل المحادثة الصفية العشوائية كحوار تعليمي، ولا تنشئ قائمة مفردات هنا. إذا لم يظهر حوار تعليمي، اكتب فقط: لا يوجد حوار تعليمي في هذا الجزء.
+نموذج المعلمة بلا تكرار: <speaker>A</speaker><russian>...</russian><pronunciation>...</pronunciation><translation>...</translation>. المتحدثان A وB دون أسماء.
 </dialogues_section>
 
 <vocabulary_section>
-مفرداته وعباراته المفيدة فقط: كلمات الدرس، ما تشرحه المعلمة أو تقرؤه كنموذج، تحياتها ووداعها وتعليماتها الصفية القابلة لإعادة الاستخدام، وعبارات ومفردات الحوارات. لكل مدخل:
-<vocabulary_item><category>تصنيف موضوعي قصير</category><russian>الكلمة الصحيحة</russian><pronunciation>أقرب لفظ</pronunciation><translation>المعنى بالعربية</translation><english>المعنى بالإنجليزية</english></vocabulary_item>
+كل الكلمات والعبارات المفيدة من نص الدرس ومن كلام المعلمة الروسي أثناء الشرح، حتى إن لم تقرأها من النص؛ تشمل تعليمات الصف والحوار. استبعد الكلام الإداري وتكرار الطلاب والمقاطع بلا معنى. العبارة كاملة والكلمات ذات المعنى المستقل، دون تكرار. لكل مدخل: <vocabulary_item><category>مجموعة موضوعية</category><russian>...</russian><pronunciation>...</pronunciation><translation>...</translation><english>...</english></vocabulary_item>.
+</vocabulary_section>"""
 
-لا تضف حروفاً منفردة أو مقاطع بلا معنى، ولا تكرر المدخل بسبب إعادة الطلاب. لا ترتب أبجدياً. إذا لم تظهر مفردة جديدة، لا تكتب أي كتلة <vocabulary_item>.
-</vocabulary_section>
-"""
+# Leave room for the strict response-ID wrapper added by SectionExtractor.
+MAX_CHUNK_PROMPT_CHARACTERS = 1800
 
 
 RECAP_PROMPT_TEMPLATE = """استخرج من الجزء الأخير من تسجيل درس اللغة الروسية المحدد الخلاصة والواجب فقط.
@@ -121,8 +110,8 @@ def build_boundary_context(
         return ""
 
     return SECTION_BOUNDARY_TEMPLATE.format(
-        start_hint=start_hint or "غير محددة",
-        end_hint=end_hint or "غير محددة",
+        start_hint=(start_hint[:150] if start_hint else "غير محددة"),
+        end_hint=(end_hint[-150:] if end_hint else "غير محددة"),
     )
 
 
@@ -132,17 +121,29 @@ def build_chunk_prompt(
 ) -> tuple[str, str, str]:
     """Return the single combined prompt covering all four buckets for one chunk."""
     rule_names = [name.strip() for name in prior_rule_names if name.strip()]
+    context_prefix = "قواعد سابقة: "
+    base_length = len(CHUNK_PROMPT_TEMPLATE.format(
+        boundary_context=boundary_context, review_context="",
+    ))
+    context_budget = max(0, MAX_CHUNK_PROMPT_CHARACTERS - base_length - len(context_prefix))
     if rule_names:
-        review_context = (
-            "قواعد سبق تلخيصها في محاضرات سابقة: "
-            + "، ".join(rule_names)
-            + ". إذا أعادت المعلمة واحدة منها، اكتب تحت اسمها سطرًا يبدأ بـ "
-            "\"مراجعة:\" ثم أضف المثال أو التفصيل الجديد فقط، من دون إعادة الشرح الكامل."
-        )
+        selected_names = []
+        used_characters = 0
+        for name in reversed(rule_names):
+            # The Arabic concept is enough for review detection; long
+            # parenthetical example lists needlessly exhaust the input limit.
+            name = re.sub(r"\([^()]*\)", "", name)
+            name = re.sub(r"\s+", " ", name).strip()[:110]
+            if not name or name in selected_names:
+                continue
+            if used_characters + len(name) + 2 > context_budget:
+                continue
+            selected_names.append(name)
+            used_characters += len(name) + 2
+        selected_names.reverse()
+        review_context = context_prefix + "، ".join(selected_names) if selected_names else ""
     else:
-        review_context = (
-            "هذه أول محاضرة في النسخة التراكمية؛ اشرح كل قاعدة جديدة مرة واحدة فقط."
-        )
+        review_context = ""
 
     prompt_text = CHUNK_PROMPT_TEMPLATE.format(
         boundary_context=boundary_context,
@@ -185,6 +186,31 @@ def split_chunk_response(text: str) -> dict[str, str]:
         if match:
             result[key] = match.group(1).strip()
     return result
+
+
+def missing_chunk_sections(text: str) -> list[str]:
+    """Return the tag names a combined chunk response dropped, if any.
+
+    A section that legitimately found nothing new still keeps its tag (e.g.
+    <letters_section>لا يوجد حرف جديد في هذا الجزء.</letters_section>); this
+    only flags a response that dropped an entire section's opening/closing
+    tag, which would otherwise silently save that bucket as empty.
+    """
+    text = text or ""
+    return [
+        tag
+        for _key, tag in _CHUNK_SECTION_TAGS
+        if not re.search(
+            rf"<{tag}>\s*.*?</{tag}>",
+            text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+    ]
+
+
+def chunk_response_has_all_sections(text: str) -> bool:
+    """Return True only when all four section tags are present in the response."""
+    return not missing_chunk_sections(text)
 
 
 # Kept for PromptProfile compatibility. Russian prompt generation uses

@@ -21,6 +21,8 @@ class WordExporter:
         lecture_name: str,
         clean_text: Callable[[str], str],
         date_provider: Callable[[], tuple[str, str, str]],
+        number_main_headings: bool = True,
+        document_title: str | None = None,
     ) -> None:
         try:
             from docx import Document
@@ -115,6 +117,8 @@ class WordExporter:
         def add_equation_paragraph(equation_text: str) -> None:
             """Insert a centered native Office Math paragraph."""
             paragraph = document.add_paragraph()
+            if is_english_companion:
+                set_paragraph_direction(paragraph, rtl=False)
             paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
             paragraph.paragraph_format.space_before = Pt(6)
             paragraph.paragraph_format.space_after = Pt(6)
@@ -164,6 +168,7 @@ class WordExporter:
             "<russian>" in (text or "").casefold()
             for _, text in sections
         )
+        is_english_companion = not number_main_headings
 
         for section in document.sections:
             section.top_margin = Cm(1.27)
@@ -194,6 +199,15 @@ class WordExporter:
                     field_end,
                 ]
             )
+
+        if is_english_companion:
+            for border in document.styles["Title"].element.xpath(".//w:pBdr"):
+                border.getparent().remove(border)
+            title = document.add_paragraph(style="Title")
+            title_text = re.sub(r"[^\w\s]+", " ", document_title or lecture_name)
+            title_run = title.add_run(re.sub(r"\s+", " ", title_text).strip())
+            apply_rtl_and_size(title, title_run, 20, is_bold=True)
+            title_run.font.color.rgb = RGBColor(0, 0, 0)
 
         if is_russian_course:
             title = document.add_paragraph(style="Title")
@@ -228,7 +242,7 @@ class WordExporter:
             day_name,
             hijri_date,
             gregorian_date,
-            lecture_name,
+            document_title or lecture_name,
         ]
         for index, cell in enumerate(table.rows[0].cells):
             paragraph = cell.paragraphs[0]
@@ -250,26 +264,46 @@ class WordExporter:
             )
             question_match = re.match(r"^سؤال\s*:\s*(.+)$", clean_heading)
             if question_match:
-                question_number += 1
-                question_ordinal = arabic_ordinal(
-                    question_number,
-                    definite=True,
-                )
-                formatted_heading = (
-                    f"السؤال {question_ordinal}: "
-                    f"{question_match.group(1).strip()}"
-                )
+                if number_main_headings:
+                    question_number += 1
+                    question_ordinal = arabic_ordinal(
+                        question_number,
+                        definite=True,
+                    )
+                    formatted_heading = (
+                        f"السؤال {question_ordinal}: "
+                        f"{question_match.group(1).strip()}"
+                    )
+                else:
+                    formatted_heading = clean_heading
             else:
-                main_heading_number += 1
-                formatted_heading = number_main_heading(
-                    clean_heading,
-                    main_heading_number,
-                )
+                if number_main_headings:
+                    main_heading_number += 1
+                    formatted_heading = number_main_heading(
+                        clean_heading,
+                        main_heading_number,
+                    )
+                else:
+                    formatted_heading = clean_heading
 
             run = paragraph.add_run(formatted_heading)
-            apply_rtl_and_size(paragraph, run, 16, is_bold=True)
+            apply_rtl_and_size(
+                paragraph,
+                run,
+                16,
+                is_bold=True,
+                color_rgb=(
+                    RGBColor(0, 0, 0) if not number_main_headings else None
+                ),
+            )
 
             text = strip_repeated_heading(text, clean_heading)
+            if is_english_companion:
+                text = re.sub(
+                    r"\([A-Za-z][^()<>\r\n]*\)",
+                    lambda match: match.group().replace(" ", "\u00a0"),
+                    text,
+                )
             text = repair_notebooklm_math_artifacts(text)
             text = normalize_implicit_lists(text)
             text = re.sub(r"\[[\s\d،,\-]+\]", "", text)
@@ -442,6 +476,10 @@ class WordExporter:
                 # the source line stays with its Arabic pronunciation, and the
                 # pronunciation stays with the Arabic meaning.
                 normalized_line = line.lstrip().casefold()
+                if not number_main_headings and (
+                    in_english or normalized_line.startswith("المعنى:")
+                ):
+                    paragraph.paragraph_format.keep_with_next = True
                 if (
                     "<russian>" in normalized_line
                     or normalized_line.startswith("<pronunciation>")
@@ -457,7 +495,17 @@ class WordExporter:
                 if is_subheading:
                     paragraph.style = "Heading 2"
                     run = paragraph.add_run(line_clean)
-                    apply_rtl_and_size(paragraph, run, 16, is_bold=True)
+                    apply_rtl_and_size(
+                        paragraph,
+                        run,
+                        16,
+                        is_bold=True,
+                        color_rgb=(
+                            RGBColor(0, 0, 0)
+                            if not number_main_headings
+                            else None
+                        ),
+                    )
                     continue
 
                 parts = re.split(
@@ -631,7 +679,7 @@ class WordExporter:
                         color = RGBColor(128, 0, 128)
                         is_bold = True
                     elif in_subheading:
-                        color = RGBColor(192, 0, 0)
+                        color = RGBColor(0, 0, 0) if is_english_companion else RGBColor(192, 0, 0)
                         is_bold = True
                     elif in_rule:
                         color = RGBColor(0, 139, 139)
@@ -640,6 +688,35 @@ class WordExporter:
                         color = RGBColor(0, 128, 96)
                     elif in_translation:
                         color = RGBColor(31, 78, 121)
+
+                    # Keep English terms and time ranges internally LTR while
+                    # retaining the surrounding Arabic paragraph direction.
+                    if is_english_companion and not (in_english or in_russian):
+                        chunks = re.split(
+                            r"(\([^()\u0600-\u06ff]*[A-Za-z][^()\u0600-\u06ff]*\)|"
+                            r"\d{1,2}:\d{2}(?::\d{2})?(?:[–−-]\d{1,2}:\d{2})?)",
+                            part,
+                        )
+                        for chunk in chunks:
+                            if not chunk:
+                                continue
+                            run = paragraph.add_run(chunk)
+                            apply_rtl_and_size(
+                                paragraph, run,
+                                15 if (in_pronunciation or in_translation) else 14,
+                                is_bold=is_bold, color_rgb=color,
+                                font_name=font_name,
+                            )
+                            if re.fullmatch(
+                                r"\([^()\u0600-\u06ff]*[A-Za-z][^()\u0600-\u06ff]*\)|"
+                                r"\d{1,2}:\d{2}(?::\d{2})?(?:[–−-]\d{1,2}:\d{2})?",
+                                chunk,
+                            ):
+                                # Digits and separators otherwise inherit the
+                                # Arabic bidi context in Word/LibreOffice.
+                                run.text = "\u200e" + chunk + "\u200e"
+                                run._r.get_or_add_rPr().find(qn("w:rtl")).set(qn("w:val"), "0")
+                        continue
 
                     run = paragraph.add_run(part)
                     if in_english or in_russian:
@@ -658,7 +735,8 @@ class WordExporter:
                         apply_rtl_and_size(
                             paragraph,
                             run,
-                            15 if (in_pronunciation or in_translation) else 16,
+                            15 if (in_pronunciation or in_translation)
+                            else (14 if is_english_companion else 16),
                             is_bold=is_bold,
                             color_rgb=color,
                             font_name=font_name,

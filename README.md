@@ -48,6 +48,10 @@ waiting for a response and clicks it automatically when NotebookLM gets stuck.
 inside the same Chrome window. NotebookLM disables the active tab's query box
 while it responds, so separate tabs are used for parallel extraction. The
 default is `3`; reduce it to `1` for fully sequential extraction.
+Russian and English extraction match each reply to a unique request token,
+including retries, so replies from another tab cannot be used as a fallback.
+Russian cumulative documents are saved only after all requests finish, in
+the original lesson order.
 
 ## Usage
 
@@ -86,13 +90,36 @@ The script will wait for a bit to allow you to log in. Once logged in, the sessi
 
 ## Output Structure
 The extracted files are saved in the local `output/` directory:
-- `transcript.txt`: The phase-one extraction-plan response (legacy diagnostic filename).
-- `headings.txt`: The parsed extraction items (legacy diagnostic filename).
-- `section_prompts.md`: The generated prompts for the selected content type.
 - `<lecture>.md`: The final transcript assembled from the separate detailed extractions.
 - `<lecture>.docx`: The formatted Word version of the assembled transcript.
-- Russian courses instead update two cumulative Word files: a summary for
-  lectures `1-N` and a separate thematic vocabulary table for lectures `1-N`.
+- Russian courses instead update two cumulative Word files: the existing summary
+  for lectures `1-N` and `قاموس مفردات اللغة الروسية - نسخة الحفظ - المحاضرات 1-N.docx`.
+  The dictionary groups verbs by infinitive and nouns by base form, with Arabic
+  pronunciation, Arabic/English meanings, and no visible lecture-number column.
+  Word starts with four-column thematic study tables. Each basic entry occurs
+  once and links to shared models in a final inflection appendix. Spelling/stem
+  exceptions appear beside the word; exact stress-only differences can use short
+  explicit rules instead of another complete table. Every full form must be
+  reconstructible from its model and exceptions before publication. Verb models
+  remain independent per tense/mood; indeclinables have a label, not a repeated
+  twelve-cell table. Full paradigms and provenance remain in the internal cache.
+  Older dictionaries/flat tables are not overwritten. The earlier grouped layout
+  is available with `scripts/build_russian_lexicon.py --render-only --layout compact`
+  and the full per-word layout with `--layout expanded`; the default is `study`.
+
+The raw cumulative state stays in `.russian_course_cumulative.json`. A separate
+`.russian_lexicon.json` stores the derived entries, original records, source links
+and morphology review queue. New uncertain base meanings or pronunciation stress
+block dictionary publication rather than inventing an answer; the extraction is
+still preserved for review. See `app/resources/README.md` for references, licences
+and the offline rebuild commands. Russian extraction prompts, summaries and the
+Arabic/English workflows are not changed by this dictionary layer.
+
+The extraction plan (`transcript.txt`, `headings.txt`) and generated prompts
+(`section_prompts.md`) are temporary. The app removes them after a successful
+run. If extraction fails, it keeps them in `output/` for diagnosis or resume.
+Existing QA render folders under `.work_transcripts/` are separate development
+artifacts; the app does not create or automatically delete those folders.
 
 ## Project Structure
 
@@ -108,8 +135,12 @@ The extracted files are saved in the local `output/` directory:
 - `app/prompts/generator.py`: builds one prompt per heading or final question.
 - `app/exporters/text.py`: transcript, headings, prompts, and Markdown output.
 - `app/exporters/word.py`: Word document rendering.
-- `app/exporters/russian_course.py`: cumulative Russian summary and thematic
-  vocabulary Word documents with cross-lecture deduplication.
+- `app/exporters/russian_course.py`: cumulative Russian summary and dictionary
+  export integration, with the legacy flat-table renderer retained separately.
+- `app/services/russian_lexicon.py`: source-preserving lemma grouping, morphology,
+  semantic families and reviewed reference data.
+- `app/exporters/russian_lexicon.py`: preserved compact/expanded layouts and
+  dispatch to the linked study layout in `russian_study.py`.
 - `app/exporters/file.py`: backward-compatible exporter facade.
 - `web_app.py`: local HTTP server and extraction job manager.
 - `web/`: local browser interface.

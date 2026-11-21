@@ -41,10 +41,14 @@ class FileExporter:
         cls,
         sections: list,
         lecture_name: str = "final_transcript",
+        number_main_headings: bool = True,
+        document_title: str | None = None,
     ) -> None:
         WordExporter.save(
             sections=sections,
             lecture_name=lecture_name,
             clean_text=cls.clean_spacing,
             date_provider=cls.get_current_dates,
+            number_main_headings=number_main_headings,
+            document_title=document_title,
         )

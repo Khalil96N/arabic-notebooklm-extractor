@@ -318,13 +318,7 @@ def clean_spacing(text: str) -> str:
 
 def _russian_item_key(value: str) -> str:
     """Normalize one Cyrillic study item for conservative deduplication."""
-    value = unicodedata.normalize("NFKD", value)
-    value = "".join(
-        character
-        for character in value
-        if not unicodedata.combining(character)
-    )
-    return re.sub(r"[\W_]+", "", value, flags=re.UNICODE).casefold()
+    return re.sub(r"[\W_]+", "", study_text_key(value), flags=re.UNICODE)
 
 
 def _remove_student_specific_correction_context(line: str) -> str:
@@ -424,10 +418,13 @@ def compact_russian_classroom_content(text: str) -> str:
     """
     text = clean_spacing(text)
     compacted_lines: list[str] = []
-    seen_russian_items: set[str] = set()
+    seen_study_lines: set[str] = set()
 
     for original_line in text.splitlines():
         line = original_line.strip()
+        if re.search(r"<(?:subheading|speaker)>", line, re.IGNORECASE):
+            # An example can legitimately recur in another rule or turn.
+            seen_study_lines.clear()
         if not line:
             if compacted_lines and compacted_lines[-1]:
                 compacted_lines.append("")
@@ -485,12 +482,6 @@ def compact_russian_classroom_content(text: str) -> str:
             compacted_lines.append(line)
             continue
 
-        item_keys = {
-            key
-            for item in russian_items
-            if (key := _russian_item_key(item))
-        }
-
         if has_student_reference and is_student_turn:
             if not is_teacher_correction:
                 continue
@@ -498,13 +489,13 @@ def compact_russian_classroom_content(text: str) -> str:
             if not line:
                 continue
 
-        if item_keys and item_keys.issubset(seen_russian_items):
-            # Keep a genuinely new teacher note even when its Russian example
-            # repeats, but never keep a duplicate individual correction turn.
-            if "<highlight>" not in line.casefold() or has_student_reference:
-                continue
-
-        seen_russian_items.update(item_keys)
+        # Match the entire cleaned line, not just its Russian word. Otherwise
+        # a later pronunciation, meaning, or untagged explanation is lost before
+        # the scoped letter/rule merger has a chance to retain it.
+        line_key = study_text_key(line)
+        if line_key in seen_study_lines:
+            continue
+        seen_study_lines.add(line_key)
         compacted_lines.append(line)
 
     return re.sub(
@@ -760,39 +751,189 @@ def parse_rule_blocks(text: str) -> list[tuple[str | None, str]]:
     return blocks
 
 
+_STUDY_FIELD_RE = re.compile(
+    r"<(pronunciation|translation|highlight)>\s*(.*?)\s*</\1>",
+    re.IGNORECASE | re.DOTALL,
+)
+_STUDY_CARD_RE = re.compile(
+    r"<russian>\s*(.*?)\s*</russian>"
+    r"((?:\s*<(?:pronunciation|translation|highlight)>.*?"
+    r"</(?:pronunciation|translation|highlight)>)*)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def study_text_key(text: str) -> str:
+    """Ignore stress/Arabic vowel marks without conflating Russian Й/И or Ё/Е."""
+    text = unicodedata.normalize("NFC", text).casefold()
+    text = re.sub(r"[\u0300\u0301\u0610-\u061a\u064b-\u065f\u0670\u06d6-\u06edـ]", "", text)
+    return re.sub(r"\s+", " ", text).strip().rstrip(".!؟?")
+
+
+def _merge_study_values(values: list[str]) -> str:
+    kept: list[str] = []
+    for value in values:
+        for part in re.split(r"\s+؛\s+", value):
+            key = study_text_key(part)
+            if not key or any(key == study_text_key(old) for old in kept):
+                continue
+            # Word-boundary containment avoids repeating a short description
+            # already contained in a fuller version; distinct details survive.
+            if any(re.search(r"(?<!\w)" + re.escape(key) + r"(?!\w)", study_text_key(old)) for old in kept):
+                continue
+            kept = [old for old in kept if not re.search(
+                r"(?<!\w)" + re.escape(study_text_key(old)) + r"(?!\w)", key
+            )]
+            kept.append(part.strip())
+    return " ؛ ".join(kept)
+
+
+def merge_repeated_study_cards(text: str) -> str:
+    """Keep one Russian example, merging all of its fields and nearby prose.
+
+    Scope this to ONE rule or letter. The same word can legitimately be an
+    example under two different rules. Never drop new meanings or prose.
+    """
+    pieces: list[str | dict] = []
+    cards: dict[str, dict] = {}
+    prose_seen: set[str] = set()
+    cursor = 0
+
+    def add_prose(value: str) -> None:
+        for line in value.strip().splitlines():
+            key = study_text_key(line)
+            if key and key not in prose_seen:
+                prose_seen.add(key)
+                pieces.append(line.strip())
+
+    for match in _STUDY_CARD_RE.finditer(text):
+        add_prose(text[cursor:match.start()])
+        russian = match.group(1).strip()
+        key = study_text_key(russian)
+        if key not in cards:
+            cards[key] = {"russian": russian, "fields": {}}
+            pieces.append(cards[key])
+        fields = cards[key]["fields"]
+        for field in _STUDY_FIELD_RE.finditer(match.group(2)):
+            fields.setdefault(field.group(1).lower(), []).append(field.group(2))
+        cursor = match.end()
+    add_prose(text[cursor:])
+    rendered = []
+    for piece in pieces:
+        if isinstance(piece, str):
+            rendered.append(piece)
+        else:
+            rendered.append(f'<russian>{piece["russian"]}</russian>' + " ".join(
+                f"<{tag}>{_merge_study_values(values)}</{tag}>"
+                for tag, values in piece["fields"].items()
+            ))
+    return "\n".join(rendered)
+
+
+def _letter_key(text: str) -> str | None:
+    pair = re.fullmatch(r"([А-ЯЁ])\s*[/—–-]?\s*([а-яё])", text.strip())
+    return pair.group(1) if pair and pair.group(1).lower() == pair.group(2) else None
+
+
+def _letter_entry_score(entry: str) -> tuple[bool, int]:
+    # An entry that lists the letter's syllables is the most useful copy.
+    return ("مقاطع" in entry or "المقاطع" in entry, len(entry))
+
+
+def merge_repeated_letter_entries(chunk_texts: list[str]) -> str:
+    """Join per-chunk letters-section texts, keeping each letter only once.
+
+    The same letter is often taught again in later chunks of one lecture (an
+    alphabet overview followed by per-letter practice, or a letter revisited
+    after a break). Each letter entry starts at its `<russian>Н н</russian>`
+    tag; repeats are folded into the first occurrence's position, keeping the
+    most detailed version first, then merging every distinct field, example,
+    and untagged note from the other copies.
+    """
+    order: list[str] = []
+    best: dict[str, str] = {}
+    copies: dict[str, list[str]] = {}
+    other_blocks: list[str] = []
+
+    for chunk_text in chunk_texts:
+        # Per-chunk <subheading> markers (often unclosed or empty) only
+        # repeat the section heading, so drop them before splitting.
+        cleaned = re.sub(
+            r"<subheading>\s*الحروف الجديدة\s*</subheading>", "", chunk_text,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(r"</?subheading>", "", cleaned, flags=re.IGNORECASE)
+        starts = [m.start() for m in re.finditer(
+            r"<russian>(.*?)</russian>", cleaned, re.IGNORECASE | re.DOTALL
+        ) if _letter_key(m.group(1))]
+        bounds = sorted(set([0, *starts, len(cleaned)]))
+        for start, end in zip(bounds, bounds[1:]):
+            piece = cleaned[start:end]
+            piece = piece.strip()
+            if not piece:
+                continue
+            match = re.match(r"<russian>(.*?)</russian>", piece, re.I | re.S)
+            key = _letter_key(match.group(1)) if match else None
+            if key is None:
+                other_blocks.append(piece)
+                continue
+            piece = f"<russian>{key} {key.lower()}</russian>" + piece[match.end():]
+            copies.setdefault(key, []).append(piece)
+            if key not in best:
+                order.append(key)
+                best[key] = piece
+                continue
+            if _letter_entry_score(piece) > _letter_entry_score(best[key]):
+                best[key] = piece
+
+    entries = []
+    for key in order:
+        entries.append(merge_repeated_study_cards("\n".join(
+            [best[key], *(copy for copy in copies[key] if copy != best[key])]
+        )))
+    return "\n".join([*dict.fromkeys(other_blocks), *entries])
+
+
 def merge_adjacent_rule_chunks(chunk_texts: list[str]) -> str:
-    """Join per-chunk rules-section texts, merging a rule split across a
-    chunk boundary into one block instead of leaving two separate,
-    near-duplicate <subheading> entries.
+    """Join per-chunk rules-section texts, keeping one block per rule.
 
     Each Russian lesson chunk is extracted independently, so a grammar rule
-    the teacher starts explaining near the end of one chunk and finishes at
-    the start of the next comes back as two blocks with the same heading.
-    This walks the flattened block sequence and appends a block onto the
-    previous one whenever their normalized titles match, dropping the
-    repeated <subheading> line from the continuation.
+    may return in adjacent chunks or recur later during an exercise. This
+    walks the flattened block sequence and appends every matching title onto
+    its first block, dropping the repeated <subheading> line. Exact repeated
+    explanations are discarded; genuinely new examples are retained.
     """
     merged: list[tuple[str | None, str]] = []
+    titled_indexes: dict[str, int] = {}
     for chunk_text in chunk_texts:
         for title, block_text in parse_rule_blocks(chunk_text):
-            previous = merged[-1] if merged else None
-            if (
-                previous is not None
-                and title is not None
-                and previous[0] is not None
-                and normalize_arabic_key(title) == normalize_arabic_key(previous[0])
-            ):
+            normalized_title = (
+                normalize_arabic_key(title) if title is not None else ""
+            )
+            if normalized_title and normalized_title in titled_indexes:
+                existing_index = titled_indexes[normalized_title]
+                existing_title, existing_text = merged[existing_index]
                 continuation = _RULE_SUBHEADING_RE.sub(
                     "", block_text, count=1
                 ).strip()
-                merged[-1] = (
-                    previous[0],
-                    f"{previous[1]}\n{continuation}".strip(),
-                )
+                if (
+                    continuation
+                    and normalize_arabic_key(continuation)
+                    not in normalize_arabic_key(existing_text)
+                ):
+                    merged[existing_index] = (
+                        existing_title,
+                        f"{existing_text}\n{continuation}".strip(),
+                    )
             else:
                 merged.append((title, block_text))
+                if normalized_title:
+                    titled_indexes[normalized_title] = len(merged) - 1
 
-    return "\n\n".join(block_text for _title, block_text in merged)
+    return "\n\n".join(
+        merge_repeated_study_cards(block_text) if title is not None else block_text
+        for title, block_text in merged
+    )
 
 
 def get_current_dates() -> tuple[str, str, str]:

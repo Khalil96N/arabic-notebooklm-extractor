@@ -2,10 +2,17 @@ import unittest
 
 from app.models.schemas import ExtractionItem
 from app.parser.extraction_plan import ExtractionPlanParser
+from app.prompts.arabic_lecture_templates import build_outline_prompt
 from app.prompts.generator import PromptGenerator
 
 
 class ExtractionPlanParserTests(unittest.TestCase):
+    def test_arabic_outline_prompt_names_the_only_target_lecture(self):
+        prompt = build_outline_prompt("النحو_06")
+
+        self.assertIn("المحاضرة (النحو_06) وحدها", prompt)
+        self.assertIn("تجاهل محتوى المحادثات السابقة", prompt)
+
     def test_explicit_markers_can_share_one_line(self):
         text = (
             "[[رئيسي: أولاً: القسم الأول]] "
@@ -21,6 +28,22 @@ class ExtractionPlanParserTests(unittest.TestCase):
                 "ثانياً: القسم الثاني",
                 "ثالثاً: القسم الثالث",
             ],
+            [item.title for item in items],
+        )
+
+    def test_english_parse_preserves_source_numbers_and_order(self):
+        text = (
+            "[[رئيسي: أولاً: Dynamics]]\n"
+            "[[رئيسي: 2. Kinematics]]"
+        )
+
+        items = ExtractionPlanParser.parse_items(
+            text,
+            number_main_headings=False,
+        )
+
+        self.assertEqual(
+            ["Dynamics", "2. Kinematics"],
             [item.title for item in items],
         )
 
@@ -129,6 +152,31 @@ class ExtractionPlanParserTests(unittest.TestCase):
         self.assertIn("بدأ الشارح هنا", prompts[0].prompt_text)
         self.assertIn("انتهى الشارح هنا", prompts[0].prompt_text)
         self.assertIn("ولا تنتقل إلى ما بعد جملة النهاية", prompts[0].prompt_text)
+
+    def test_arabic_transcript_prompt_reduces_internal_subheadings(self):
+        prompts = PromptGenerator.generate_prompts(
+            [ExtractionItem(title="القسم الرئيس", level=1)]
+        )
+
+        prompt = prompts[0].prompt_text
+        self.assertIn("الأصل عدم إنشاء عناوين فرعية داخل القسم", prompt)
+        self.assertIn("بحد أقصى عنوانان فرعيان في القسم الطويل", prompt)
+        self.assertIn("ثم أكمل الشرح في السطر نفسه", prompt)
+
+    def test_end_question_prompt_allows_at_most_one_major_subheading(self):
+        prompts = PromptGenerator.generate_prompts(
+            [
+                ExtractionItem(
+                    title="ما حكم المسألة؟",
+                    level=2,
+                    kind="end_question",
+                )
+            ]
+        )
+
+        prompt = prompts[0].prompt_text
+        self.assertIn("الأصل أن يبقى الجواب متصلاً بلا عناوين فرعية", prompt)
+        self.assertIn("بحد أقصى عنوان فرعي واحد في الجواب كله", prompt)
 
     def test_end_questions_are_extracted_only_after_explanation_boundary(self):
         text = """

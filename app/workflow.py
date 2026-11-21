@@ -1,13 +1,18 @@
+import re
+
 from app.browser.manager import BrowserManager
 from app.config.settings import settings
 from app.exporters.common import (
     compact_russian_classroom_content,
     merge_adjacent_rule_chunks,
+    merge_repeated_letter_entries,
+    normalize_arabic_key,
     normalize_implicit_lists,
     safe_output_name,
     strip_repeated_heading,
 )
 from app.exporters.file import FileExporter
+from app.exporters.text import TextExporter
 from app.exporters.russian_course import (
     get_prior_rule_names,
     update_cumulative_outputs,
@@ -24,6 +29,20 @@ from app.services.notebooklm import NotebookLMService
 from app.utils.logger import logger
 
 
+_EMPTY_BUCKET_MESSAGES = frozenset(
+    normalize_arabic_key(message)
+    for message in (
+        "لا يوجد حرف جديد في هذا الجزء.",
+        "لا توجد قاعدة جديدة في هذا الجزء.",
+        "لا يوجد حوار تعليمي في هذا الجزء.",
+    )
+)
+_ENGLISH_LOGISTICS_BLOCK = re.compile(
+    r"<logistics>\s*(.*?)\s*</logistics>",
+    flags=re.IGNORECASE | re.DOTALL,
+)
+
+
 def aggregate_russian_chunks(
     prompts: list[PromptItem],
     sections: list[tuple[str, str]],
@@ -38,7 +57,6 @@ def aggregate_russian_chunks(
     joins same-bucket text across chunks in chunk order.
     """
     summary_by_heading: dict[str, list[str]] = {}
-    summary_order: list[str] = []
     vocabulary_parts: list[str] = []
 
     def add_summary(heading: str, raw_text: str) -> None:
@@ -47,9 +65,14 @@ def aggregate_russian_chunks(
         text = normalize_implicit_lists(text)
         if not text.strip():
             return
+        # A chunk that legitimately found nothing new returns only that
+        # fallback sentence; keeping every one of those in the final
+        # document would litter it with "no new letter/rule/dialogue in
+        # this part" lines for every empty chunk.
+        if normalize_arabic_key(text) in _EMPTY_BUCKET_MESSAGES:
+            return
         if heading not in summary_by_heading:
             summary_by_heading[heading] = []
-            summary_order.append(heading)
         summary_by_heading[heading].append(text)
 
     def add_vocabulary(raw_text: str) -> None:
@@ -76,13 +99,99 @@ def aggregate_russian_chunks(
             # in the next comes back as two separate chunk calls; merge a
             # matching pair of <subheading> blocks instead of leaving both.
             return merge_adjacent_rule_chunks(chunk_texts)
+        if heading == "الحروف الجديدة":
+            # The same letter is re-taught across chunks; keep it once.
+            return merge_repeated_letter_entries(chunk_texts)
         return "\n\n".join(chunk_texts)
 
     summary_sections = [
-        (heading, join_bucket(heading)) for heading in summary_order
+        (heading, join_bucket(heading))
+        for heading in (
+            "الحروف الجديدة",
+            "القواعد والتطبيقات",
+            "الحوارات الروسية",
+            "الخلاصة والواجب",
+        )
+        if heading in summary_by_heading
     ]
     vocabulary_text = "\n\n".join(vocabulary_parts)
     return summary_sections, vocabulary_text
+
+
+def aggregate_english_sections(
+    prompts: list[PromptItem],
+    sections: list[tuple[str, str]],
+) -> list[tuple[str, str]]:
+    """Move useful course logistics into one final section and drop its scan."""
+    if len(prompts) != len(sections):
+        raise ValueError("English prompts and extraction results must align.")
+
+    cleaned_sections: list[tuple[str, str]] = []
+    logistics: list[str] = []
+    seen_logistics: set[str] = set()
+    empty_logistics = {
+        normalize_arabic_key(message)
+        for message in (
+            "لا توجد معلومات تنظيمية مهمة.",
+            "لا توجد معلومات تنظيمية مهمة",
+            "لا توجد معلومات تنظيمية",
+            "لا توجد معلومات إدارية مهمة.",
+            "لا توجد معلومات ادارية مهمة.",
+            "لا توجد معلومات عملية مهمة.",
+            "لا يوجد شيء مهم.",
+            "لم ترد معلومات تنظيمية مهمة.",
+            "لا يوجد",
+            "none",
+            "n/a",
+            "no relevant logistics",
+            "no important logistics",
+        )
+    }
+
+    for prompt, (heading, raw_text) in zip(prompts, sections):
+        def collect_logistics(match: re.Match[str]) -> str:
+            for line in match.group(1).splitlines():
+                item = re.sub(r"^\s*(?:[-*•]|\d+[.)])\s*", "", line)
+                item = re.sub(r"\s+", " ", item).strip()
+                if not item:
+                    continue
+                key = normalize_arabic_key(item)
+                if key in empty_logistics or key in seen_logistics:
+                    continue
+                seen_logistics.add(key)
+                logistics.append(item)
+            return ""
+
+        # NotebookLM may emit LaTeX commands despite the UnicodeMath prompt.
+        # Canonicalize only English notes before both final exports.
+        text = re.sub(
+            r"\\(sum|times|cdot|leq|geq|neq)(?![A-Za-z])",
+            lambda match: {
+                "sum": "∑", "times": "×", "cdot": "×",
+                "leq": "≤", "geq": "≥", "neq": "≠",
+            }[match.group(1)],
+            raw_text,
+        )
+        text = re.sub(
+            r"∑_\{([^}]+)\}\^\{?([A-Za-z0-9]+)\}?",
+            lambda match: f"∑_({match.group(1)})^{match.group(2)}",
+            text,
+        )
+        text = _ENGLISH_LOGISTICS_BLOCK.sub(collect_logistics, text)
+        # Do not leak a malformed or unclosed internal marker into the files.
+        text = re.sub(r"</?logistics>", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\n[ \t]*\n(?:[ \t]*\n)+", "\n\n", text).strip()
+        if prompt.output_kind != "logistics":
+            cleaned_sections.append((heading, text))
+
+    if logistics:
+        cleaned_sections.append(
+            (
+                "معلومات تنظيمية مهمة",
+                "\n".join(f"- {item}" for item in logistics),
+            )
+        )
+    return cleaned_sections
 
 
 def next_output_name(lecture_name: str) -> str:
@@ -153,7 +262,7 @@ async def run_workflow(
             plan.items,
             content_type,
             prior_rule_names=(
-                get_prior_rule_names()
+                get_prior_rule_names(lecture_name)
                 if content_type == "russian"
                 else None
             ),
@@ -196,6 +305,8 @@ async def run_workflow(
                 f"{vocabulary_path.name}[/bold green]"
             )
         else:
+            if content_type == "english":
+                sections = aggregate_english_sections(prompts, sections)
             cleaned_sections = [
                 (
                     heading,
@@ -211,12 +322,20 @@ async def run_workflow(
                 for heading, text in sections
             )
             FileExporter.save_final_transcript(final_text, output_name)
-            FileExporter.save_word_document(sections, output_name)
+            FileExporter.save_word_document(
+                sections,
+                output_name,
+                number_main_headings=content_type != "english",
+                document_title=(
+                    lecture_name if content_type == "english" else None
+                ),
+            )
 
         logger.info(
             f"[bold green]Workflow completed successfully! "
             f"Output saved as {output_name}[/bold green]"
         )
+        TextExporter.cleanup_diagnostics()
         return output_name
     except Exception as exc:
         logger.exception(

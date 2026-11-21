@@ -19,4 +19,9 @@ class ExtractionPlan(BaseModel):
 class PromptItem(BaseModel):
     heading: str
     prompt_text: str
-    output_kind: Literal["summary", "vocabulary", "combined"] = "summary"
+    output_kind: Literal[
+        "summary",
+        "vocabulary",
+        "combined",
+        "logistics",
+    ] = "summary"

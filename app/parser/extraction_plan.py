@@ -50,7 +50,11 @@ class ExtractionPlanParser:
     )
 
     @classmethod
-    def parse_items(cls, discovery_text: str) -> list[ExtractionItem]:
+    def parse_items(
+        cls,
+        discovery_text: str,
+        number_main_headings: bool = True,
+    ) -> list[ExtractionItem]:
         logger.info(
             "[bold cyan]Parsing items from the extraction plan...[/bold cyan]"
         )
@@ -145,8 +149,12 @@ class ExtractionPlanParser:
                 continue
 
             title_without_ordinal = (
-                strip_main_heading_ordinal(title) if kind == "main" else title
+                strip_main_heading_ordinal(title)
+                if kind == "main"
+                else title
             )
+            if kind == "main":
+                title = title_without_ordinal
             normalized_title = (
                 kind,
                 cls._normalize_title(title_without_ordinal),
@@ -154,7 +162,7 @@ class ExtractionPlanParser:
             if normalized_title in seen_titles:
                 continue
 
-            if kind == "main":
+            if kind == "main" and number_main_headings:
                 main_heading_number += 1
                 title = number_main_heading(
                     title_without_ordinal,

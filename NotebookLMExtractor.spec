@@ -3,7 +3,7 @@
 from PyInstaller.utils.hooks import collect_all
 
 
-datas = [("web", "web")]
+datas = [("web", "web"), ("app/resources", "app/resources")]
 hiddenimports = []
 
 for package in (
@@ -12,6 +12,9 @@ for package in (
     "pydantic_settings",
     "docx",
     "rich",
+    "pymorphy3",
+    "pymorphy3_dicts_ru",
+    "dawg2_python",
 ):
     package_datas, package_binaries, package_hiddenimports = collect_all(
         package

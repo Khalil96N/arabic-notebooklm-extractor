@@ -6,12 +6,66 @@ from pathlib import Path
 from unittest.mock import patch
 
 from docx import Document
+from docx.shared import RGBColor
 
 from app.config.settings import settings
 from app.exporters.file import FileExporter
 
 
 class WordExporterTests(unittest.TestCase):
+    def test_english_notes_keep_parenthesized_terms_and_times_ltr_in_arabic(self):
+        from docx.oxml.ns import qn
+
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(settings, "OUTPUT_DIR", Path(directory)):
+                FileExporter.save_word_document(
+                    [("مراجعة", "درجات الحرية (Degrees of Freedom) والموعد 14:00–16:00.\n"
+                      "<equation>M = d × (n − 1 − g) + ∑_(i=1)^g f_i</equation>\n"
+                      "حيث <equation>f_i</equation> درجة حرية المفصل.")],
+                    "mixed_notes", number_main_headings=False,
+                )
+            document = Document(Path(directory) / "mixed_notes.docx")
+            paragraph = next(p for p in document.paragraphs if "درجات الحرية" in p.text)
+            self.assertEqual("1", paragraph._p.pPr.find(qn("w:bidi")).get(qn("w:val")))
+            for token in ["(Degrees\u00a0of\u00a0Freedom)", "14:00–16:00"]:
+                run = next(r for r in paragraph.runs if r.text.strip("\u200e") == token)
+                self.assertEqual("0", run._r.rPr.find(qn("w:rtl")).get(qn("w:val")))
+                self.assertEqual("\u200e" + token + "\u200e", run.text)
+            xml = document._element.xml
+            self.assertIn("<m:sSub>", xml)
+            self.assertNotIn("f_i", xml)
+
+    def test_companion_passages_keep_english_then_arabic_and_native_equations(self):
+        from docx.oxml.ns import qn
+
+        text = (
+            "<english>\nThe system has one degree of freedom.\n</english>\n"
+            "المعنى: يمتلك النظام درجة حرية واحدة.\n"
+            "الشرح: يكفي متغير مستقل واحد لوصف حركته.\n"
+            "كلمات تساعدك: <term>independent</term> = مستقل.\n"
+            "<equation>M = 1</equation>\n"
+            "<english>\nNow compare two systems.\n</english>\n"
+            "المعنى: قارن الآن بين نظامين."
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(settings, "OUTPUT_DIR", Path(directory)):
+                FileExporter.save_word_document(
+                    [("Degrees of Freedom", text)], "companion", number_main_headings=False
+                )
+            doc = Document(Path(directory) / "companion.docx")
+        paragraphs = [p for p in doc.paragraphs if p.text.strip()]
+        english = next(p for p in paragraphs if p.text.startswith("The system"))
+        meaning = next(p for p in paragraphs if p.text.startswith("المعنى:"))
+        explanation = next(p for p in paragraphs if p.text.startswith("الشرح:"))
+        self.assertLess(paragraphs.index(english), paragraphs.index(meaning))
+        self.assertLess(paragraphs.index(meaning), paragraphs.index(explanation))
+        self.assertEqual("0", english._p.pPr.find(qn("w:bidi")).get(qn("w:val")))
+        self.assertEqual("1", meaning._p.pPr.find(qn("w:bidi")).get(qn("w:val")))
+        self.assertEqual("1", explanation._p.pPr.find(qn("w:bidi")).get(qn("w:val")))
+        self.assertTrue(english.paragraph_format.keep_with_next)
+        self.assertTrue(doc.element.xpath(".//m:oMath"))
+        self.assertNotIn("<english>", "\n".join(p.text for p in paragraphs))
+
     def test_unclosed_highlight_does_not_color_following_paragraphs(self):
         sections = [
             (
@@ -110,6 +164,59 @@ class WordExporterTests(unittest.TestCase):
             paragraph_texts,
         )
         self.assertEqual(["Heading 1", "Heading 1", "Heading 1"], heading_styles)
+
+    def test_word_titles_can_preserve_source_order_without_added_ordinals(self):
+        sections = [
+            ("7. Mobility", "شرح القدرة الحركية."),
+            ("2. Degrees of Freedom", "شرح درجات الحرية."),
+            ("سؤال للمراجعة: ما الفرق؟", "الإجابة."),
+        ]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir)
+            with (
+                patch.object(settings, "OUTPUT_DIR", output_dir),
+                patch.object(
+                    FileExporter,
+                    "get_current_dates",
+                    return_value=("الأربعاء", "24 ذو الحجة 1447هـ", "2026-06-10"),
+                ),
+            ):
+                FileExporter.save_word_document(
+                    sections,
+                    "اختبار بلا ترقيم تلقائي",
+                    number_main_headings=False,
+                    document_title="عنوان المحاضرة من المصدر",
+                )
+
+            document = Document(output_dir / "اختبار بلا ترقيم تلقائي.docx")
+            headings = [
+                paragraph.text
+                for paragraph in document.paragraphs
+                if paragraph.style.name == "Heading 1"
+            ]
+
+        self.assertEqual(
+            [
+                "7. Mobility",
+                "2. Degrees of Freedom",
+                "سؤال للمراجعة: ما الفرق؟",
+            ],
+            headings,
+        )
+        self.assertEqual(
+            "عنوان المحاضرة من المصدر",
+            document.tables[0].rows[0].cells[3].text,
+        )
+        first_heading = next(
+            paragraph
+            for paragraph in document.paragraphs
+            if paragraph.style.name == "Heading 1" and paragraph.runs
+        )
+        self.assertEqual(
+            RGBColor(0, 0, 0),
+            first_heading.runs[0].font.color.rgb,
+        )
 
     def test_markdown_heading_is_moved_to_a_new_line(self):
         text = "نهاية الفقرة السابقة. ## خامساً: عنوان الفقرة\n\nالمحتوى."

@@ -4,6 +4,7 @@ from app.exporters.common import (
     clean_spacing,
     compact_russian_classroom_content,
     merge_adjacent_rule_chunks,
+    merge_repeated_letter_entries,
     normalize_implicit_lists,
     parse_rule_blocks,
     repair_notebooklm_math_artifacts,
@@ -331,6 +332,25 @@ class NormalizeImplicitListsTests(unittest.TestCase):
 
 
 class CompactRussianClassroomContentTests(unittest.TestCase):
+    def test_retains_distinct_letters_and_new_untagged_teacher_details(self):
+        text = (
+            '<russian>И и</russian><pronunciation>إي</pronunciation>\n'
+            '<russian>Й й</russian><pronunciation>إي قصيرة</pronunciation>\n'
+            '<russian>Е е</russian><pronunciation>يه</pronunciation>\n'
+            '<russian>Ё ё</russian><pronunciation>يو</pronunciation>\n'
+            '<russian>И и</russian>ملاحظة جديدة لا تحمل وسم التمييز.\n'
+            '<russian>И и</russian>ملاحظة جديدة لا تحمل وسم التمييز.'
+        )
+        result = compact_russian_classroom_content(text)
+        self.assertEqual(5, result.count('<russian>'))
+        self.assertIn('ملاحظة جديدة', result)
+        self.assertEqual(result, compact_russian_classroom_content(result))
+
+    def test_keeps_the_same_example_in_separate_rules_and_dialogue_turns(self):
+        card = '<russian>Спасибо</russian><translation>شكراً</translation>'
+        text = f'<subheading>النبر</subheading>\n{card}\n<subheading>اللباقة</subheading>\n{card}\n<speaker>A</speaker>\n{card}\n<speaker>B</speaker>\n{card}'
+        self.assertEqual(4, compact_russian_classroom_content(text).count('<russian>'))
+
     def test_removes_student_turns_and_keeps_teacher_model(self):
         text = (
             "تقرأ المعلمة النموذج الصحيح:\n"
@@ -497,6 +517,30 @@ class ParseRuleBlocksTests(unittest.TestCase):
 
 
 class MergeAdjacentRuleChunksTests(unittest.TestCase):
+    def test_repeated_examples_merge_all_fields_within_the_same_rule_only(self):
+        result = merge_adjacent_rule_chunks([
+            '<subheading>الضمائر</subheading>شرح أول.'
+            '<russian>она</russian><pronunciation>أنا</pronunciation><translation>هي</translation>',
+            '<subheading>الضمائر</subheading>تنبيه جديد.'
+            '<russian>она́</russian><pronunciation>أَنَا</pronunciation>'
+            '<translation>هي (النبر على النهاية)</translation>',
+            '<subheading>النبر</subheading><russian>она́</russian>'
+            '<pronunciation>أنا</pronunciation><translation>هي</translation>',
+        ])
+        self.assertEqual(2, result.count('<russian>'))
+        self.assertIn('النبر على النهاية', result)
+        self.assertIn('تنبيه جديد.', result)
+        self.assertEqual(result, merge_adjacent_rule_chunks([result]))
+
+    def test_does_not_conflate_russian_letters_when_ignoring_stress(self):
+        result = merge_adjacent_rule_chunks([
+            '<subheading>أمثلة</subheading><russian>все</russian><translation>الجميع</translation>'
+            '<russian>всё</russian><translation>كل شيء</translation>'
+            '<russian>и</russian><translation>و</translation>'
+            '<russian>й</russian><translation>حرف</translation>'
+        ])
+        self.assertEqual(4, result.count('<russian>'))
+
     def test_merges_a_rule_split_across_two_chunks_into_one_block(self):
         chunk_one = (
             "<subheading>جنس الأسماء</subheading>\n"
@@ -528,6 +572,22 @@ class MergeAdjacentRuleChunksTests(unittest.TestCase):
         self.assertIn("<subheading>جنس الأسماء</subheading>", merged)
         self.assertIn("<subheading>حالة الجمع</subheading>", merged)
 
+    def test_merges_a_repeated_rule_even_when_another_rule_separates_it(self):
+        merged = merge_adjacent_rule_chunks(
+            [
+                "<subheading>تضعيف الساكن</subheading>\nشرح واحد.",
+                "<subheading>الضمائر</subheading>\nشرح مختلف.",
+                "<subheading>تضعيف الساكن</subheading>\nشرح واحد.",
+            ]
+        )
+
+        self.assertEqual(
+            1,
+            merged.count("<subheading>تضعيف الساكن</subheading>"),
+        )
+        self.assertEqual(1, merged.count("شرح واحد."))
+        self.assertIn("<subheading>الضمائر</subheading>", merged)
+
     def test_fallback_no_new_rule_lines_are_never_merged_together(self):
         merged = merge_adjacent_rule_chunks(
             [
@@ -551,6 +611,83 @@ class MergeAdjacentRuleChunksTests(unittest.TestCase):
         self.assertEqual(1, merged.count("<subheading>"))
         self.assertIn("شرح أول", merged)
         self.assertIn("شرح إضافي", merged)
+
+
+class MergeRepeatedLetterEntriesTests(unittest.TestCase):
+    def test_preserves_unique_fields_examples_and_untagged_notes(self):
+        full = (
+            '<russian>Н н</russian><pronunciation>نون والمقاطع: на, но</pronunciation>'
+            '<translation>صوت أنفي</translation>'
+        )
+        short = (
+            '<russian>Н н</russian><pronunciation>ترقيق قبل и</pronunciation>'
+            '<translation>نون مرققة</translation>\nملاحظة إضافية خارج الوسوم.\n'
+            '<russian>Нина</russian><pronunciation>نينا</pronunciation>'
+            '<translation>اسم مؤنث</translation>'
+        )
+        result = merge_repeated_letter_entries([full, short])
+        self.assertEqual(1, result.count('<russian>Н н</russian>'))
+        for detail in ('на, но', 'ترقيق قبل и', 'صوت أنفي', 'نون مرققة',
+                       'ملاحظة إضافية خارج الوسوم.', 'Нина', 'اسم مؤنث'):
+            self.assertIn(detail, result)
+        self.assertEqual(result, merge_repeated_letter_entries([result]))
+
+    def test_letter_pair_variants_merge_without_heading_residue(self):
+        result = merge_repeated_letter_entries([
+            '<subheading>الحروف الجديدة</subheading><russian>Нн</russian>نون',
+            '<subheading>الحروف الجديدة</subheading><russian>Н / н</russian>نون',
+            '<russian>Й й</russian>ياء قصيرة', '<russian>И и</russian>حركة',
+        ])
+        self.assertEqual(1, result.count('<russian>Н н</russian>'))
+        self.assertNotIn('الحروف الجديدة', result)
+        self.assertIn('Й й', result)
+        self.assertIn('И и', result)
+
+    def test_repeated_letter_kept_once_with_richest_entry(self):
+        overview = (
+            "<subheading>\n"
+            "<russian>Н н</russian> <pronunciation>اسم الحرف: إن</pronunciation>\n"
+            "<russian>М м</russian> <pronunciation>اسم الحرف: إم</pronunciation>"
+        )
+        practice = (
+            "<subheading>\n"
+            "<russian>Н н</russian> <pronunciation>اسم الحرف: إن، "
+            "والمقاطع: на, но</pronunciation> "
+            "<highlight>ملاحظة نطق: نون</highlight>"
+        )
+
+        merged = merge_repeated_letter_entries([overview, practice])
+
+        self.assertEqual(1, merged.count("<russian>Н н</russian>"))
+        self.assertEqual(1, merged.count("<russian>М м</russian>"))
+        self.assertIn("والمقاطع: на, но", merged)
+        self.assertIn("ملاحظة نطق: نون", merged)
+        self.assertLess(merged.index("Н н"), merged.index("М м"))
+        self.assertNotIn("<subheading>", merged)
+
+    def test_shorter_repeat_keeps_its_unique_pronunciation_note(self):
+        full = (
+            "<russian>Б б</russian> <pronunciation>اسم الحرف: بي، "
+            "والمقاطع: ба, бо, бу</pronunciation>"
+        )
+        short = (
+            "<russian>Б б</russian> <pronunciation>بي</pronunciation> "
+            "<highlight>ملاحظة نطق: مجهور</highlight>"
+        )
+
+        merged = merge_repeated_letter_entries([full, short])
+
+        self.assertEqual(1, merged.count("<russian>Б б</russian>"))
+        self.assertIn("ба, бо, бу", merged)
+        self.assertIn("ملاحظة نطق: مجهور", merged)
+
+    def test_distinct_letters_are_all_preserved(self):
+        merged = merge_repeated_letter_entries(
+            ["<russian>А а</russian> x", "<russian>Б б</russian> y"]
+        )
+
+        self.assertIn("А а", merged)
+        self.assertIn("Б б", merged)
 
 
 if __name__ == "__main__":

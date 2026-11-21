@@ -1,8 +1,12 @@
+import re
+from time import monotonic
+
 from playwright.async_api import (
     BrowserContext,
     Page,
     TimeoutError as PWTimeoutError,
 )
+from urllib.parse import urlparse
 
 from app.config.settings import settings
 from app.services.retry_button import NotebookLMRetryButtonHandler
@@ -101,6 +105,24 @@ class NotebookLMPageClient:
         raise RuntimeError("Login timeout - could not detect NotebookLM dashboard.")
 
     async def open_notebook(self, page: Page, notebook_name: str) -> None:
+        target_url = urlparse(notebook_name)
+        if target_url.scheme or target_url.netloc:
+            if (
+                target_url.scheme != "https"
+                or target_url.hostname not in self.NOTEBOOKLM_HOSTS
+                or not target_url.path.startswith("/notebook/")
+            ):
+                raise ValueError(
+                    "Notebook URL must point to a NotebookLM notebook."
+                )
+            logger.info(
+                "[bold cyan]Opening the specified NotebookLM URL...[/bold cyan]"
+            )
+            await page.goto(notebook_name, wait_until="domcontentloaded")
+            await page.wait_for_timeout(5000)
+            logger.info("[bold green]Opened the specified notebook.[/bold green]")
+            return
+
         logger.info(
             f"[bold cyan]Searching for notebook '{notebook_name}'...[/bold cyan]"
         )
@@ -213,6 +235,7 @@ class NotebookLMPageClient:
         book_found = book_name is None
         source_rows: list[tuple[int, str]] = []
         desired_indices: set[int] = set()
+        select_all_index: int | None = None
 
         for index in range(checkbox_count):
             checkbox = checkboxes.nth(index)
@@ -230,10 +253,10 @@ class NotebookLMPageClient:
                     f"'{text}' -> '{normalized_text}'[/dim]"
                 )
 
-                # The first checkbox is normally NotebookLM's global
-                # "Select all" control.  Keep it out of the source set and
-                # set each real source to its explicit final state below.
+                # Keep the global control out of the real source set, but
+                # retain it for the default all-selected fast path.
                 if normalized_text == "selectall":
+                    select_all_index = index
                     continue
 
                 source_rows.append((index, text))
@@ -288,12 +311,12 @@ class NotebookLMPageClient:
             if await checkbox.is_checked() == desired_state:
                 return
 
-            # Angular Material owns the state on the mat-checkbox host.  A
-            # native input click or set_checked call can leave its model
-            # unchanged, while clicking the component host updates both the
-            # UI and the underlying source selection.
+            # Activate the component's real label. Clicking the outer
+            # mat-checkbox host alone does not toggle its native input in
+            # the current NotebookLM UI, including Select all sources.
             await checkbox.evaluate(
-                "(element) => element.closest('mat-checkbox').click()"
+                "(element) => { const host = element.closest('mat-checkbox'); "
+                "(host?.querySelector('label') || element).click(); }"
             )
             await page.wait_for_timeout(500)
 
@@ -303,8 +326,16 @@ class NotebookLMPageClient:
                     "selection."
                 )
 
-        # Select the requested lecture first so NotebookLM never reaches a
-        # transient zero-source state, then explicitly clear every other row.
+        # A newly opened notebook normally has every source selected. Clear
+        # that in one click, then select only the requested recording/book.
+        # Mixed or already narrow selections retain the per-row fallback.
+        if select_all_index is not None:
+            global_checkbox = checkboxes.nth(select_all_index)
+            if await global_checkbox.is_checked():
+                try:
+                    await enforce_checkbox_state(select_all_index, False)
+                except Exception:
+                    logger.warning("Select-all fast clear failed; checking each source instead.")
         for index in sorted(desired_indices):
             await enforce_checkbox_state(index, True)
         for index, _text in source_rows:
@@ -332,7 +363,9 @@ class NotebookLMPageClient:
 
         await page.wait_for_timeout(2000)
 
-    async def send_prompt(self, page: Page, prompt: str) -> None:
+    async def send_prompt(
+        self, page: Page, prompt: str, *, verify_sent: bool = False
+    ) -> None:
         logger.info("[bold cyan]Locating chat input...[/bold cyan]")
         chat_input = page.get_by_placeholder(
             "Type something",
@@ -340,6 +373,8 @@ class NotebookLMPageClient:
         ).first
 
         try:
+            if not await chat_input.count():
+                raise PWTimeoutError("Primary placeholder is absent.")
             await chat_input.wait_for(state="visible", timeout=15000)
         except PWTimeoutError:
             logger.warning(
@@ -402,12 +437,30 @@ class NotebookLMPageClient:
 
         await page.wait_for_timeout(500)
 
+        if verify_sent:
+            try:
+                await page.wait_for_function(
+                    "element => !element.value && !element.textContent?.trim()",
+                    arg=await chat_input.element_handle(),
+                    timeout=8000,
+                )
+            except PWTimeoutError as exc:
+                raise RuntimeError(
+                    "NotebookLM did not submit the prompt; the chat input "
+                    f"still contains {len(prompt)} characters."
+                ) from exc
+
     async def wait_for_response(
         self,
         page: Page,
         marker: str = None,
         previous_response: str | None = None,
+        *,
+        strict_marker: bool = False,
+        expected_heading: str | None = None,
     ) -> str:
+        if strict_marker and not marker:
+            raise ValueError("Strict response matching requires a task marker.")
         logger.info(
             f"[bold cyan]Waiting for response generation "
             f"(timeout: {settings.TIMEOUT_MS // 1000}s)...[/bold cyan]"
@@ -418,6 +471,7 @@ class NotebookLMPageClient:
         previous_text = ""
         stable_count = 0
         elapsed = 0
+        started_at = monotonic()
         poll_interval = 3000
         marker_fallback_logged = False
 
@@ -426,13 +480,19 @@ class NotebookLMPageClient:
                 previous_text = ""
                 stable_count = 0
                 elapsed = 0
+                started_at = monotonic()
                 continue
 
             if marker:
-                current_text = await self.response_by_marker(page, marker)
+                current_text = await self.response_by_marker(
+                    page, marker,
+                    **({"marker_at_start": True} if strict_marker else {}),
+                    **({"expected_heading": expected_heading} if strict_marker and expected_heading else {}),
+                )
                 if (
                     not current_text
                     and previous_response is not None
+                    and not strict_marker
                 ):
                     latest_text = await self.latest_response(page)
                     if (
@@ -451,6 +511,8 @@ class NotebookLMPageClient:
                             marker_fallback_logged = True
             else:
                 current_text = await self.latest_response(page)
+            if strict_marker and not self.has_response_marker(current_text, marker):
+                current_text = ""
             if current_text and len(current_text) > 5:
                 if current_text == previous_text:
                     stable_count += 1
@@ -469,9 +531,12 @@ class NotebookLMPageClient:
 
             previous_text = current_text
             await page.wait_for_timeout(poll_interval)
-            elapsed += poll_interval
+            elapsed = max(
+                elapsed + poll_interval,
+                int((monotonic() - started_at) * 1000),
+            )
 
-        if previous_text and len(previous_text) > 5:
+        if previous_text and len(previous_text) > 5 and not strict_marker:
             logger.warning(
                 "[bold yellow]Timed out but returning partial response."
                 "[/bold yellow]"
@@ -509,21 +574,53 @@ class NotebookLMPageClient:
             pass
         return ""
 
-    async def response_by_marker(self, page: Page, marker: str) -> str:
-        candidates = await self.response_candidates(page)
+    async def response_by_marker(
+        self, page: Page, marker: str, *, marker_at_start: bool = False,
+        expected_heading: str | None = None,
+    ) -> str:
+        candidates = await self.response_candidates(page, marker=marker)
+        # An exact request heading before the exact token is also a valid
+        # first-line identity. The outgoing instruction starts with different
+        # text and therefore still cannot be mistaken for the reply.
+        leading = r"[\s\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]*"
+        heading = rf"(?:{re.escape(expected_heading)}\s*:?\s*)?" if expected_heading else ""
+        start_pattern = rf"^{leading}(?:\*\*|`{{1,3}})?{leading}{heading}\[\[\s*{re.escape(marker)}\s*\]\]"
         matching = [
             text
             for text in candidates
-            if 0 <= text.casefold().find(marker.casefold()) <= 500
+            if self.has_response_marker(text, marker)
+            and (not marker_at_start or re.match(start_pattern, text, flags=re.IGNORECASE))
         ]
-        return min(matching, key=len) if matching else ""
+        if not matching:
+            return ""
+        return (max if marker_at_start else min)(matching, key=len)
 
-    async def response_candidates(self, page: Page) -> list[str]:
+    @staticmethod
+    def has_response_marker(text: str, marker: str | None) -> bool:
+        """Match a complete request token near the start, never a prefix."""
+        if not text or not marker:
+            return False
+        match = re.search(
+            rf"(?<![\w-]){re.escape(marker)}(?![\w-])",
+            text,
+            flags=re.IGNORECASE,
+        )
+        return match is not None and match.start() <= 500
+
+    async def response_candidates(
+        self, page: Page, *, marker: str | None = None
+    ) -> list[str]:
         candidates = []
         seen = set()
         for selector in self.response_selectors():
             try:
-                elements = await page.locator(selector).all()
+                locator = page.locator(selector)
+                if marker:
+                    # Filter in the browser before reading messages. Reading
+                    # a long shared chat one message at a time on every poll
+                    # makes concurrent workers spend minutes on old replies.
+                    locator = locator.filter(has_text=marker)
+                elements = await locator.all()
                 for element in elements:
                     text = self.clean_response_text(
                         await element.inner_text()
